@@ -1,0 +1,38 @@
+# Phase 1 MVP simulator config — values pinned per SIMULATOR_SPEC.md (2026-05-24).
+name: mvp
+age_start: 20
+age_end: 90          # T_cycle = 70
+frequency: annual
+
+# Income process — AR(1) approximated via Rouwenhorst Markov chain.
+income:
+  process: ar1_rouwenhorst
+  rho_y: 0.97
+  sigma_eps: 0.15
+  mu_y: 0.0
+  n_states: 9
+
+# Mortality — SSA Trustees Report 2020.
+mortality:
+  source: ssa_period_lifetable
+  table_year: 2020
+  sex: average          # unweighted M+F mean
+
+# Asset and rates.
+assets:
+  Rfree: 1.03
+  borrowing_constraint: 0.0     # BoroCnstArt
+
+# Prior over structural params for Phase 2 NPE training (beta locked).
+# Sampled via scrambled Sobol (scipy.stats.qmc.Sobol); BoxUniform for log-density.
+prior:
+  beta: 1.0
+  delta:
+    distribution: uniform
+    low: 0.85
+    high: 1.00
+  crra:
+    distribution: uniform
+    low: 0.5
+    high: 5.0
+  sampler: sobol_scrambled

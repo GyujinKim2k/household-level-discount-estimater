@@ -1,0 +1,14 @@
+# Hydra root config — composes simulator + npe + eval defaults.
+defaults:
+  - simulator: mvp
+  - npe: phase2
+  - eval: sbc
+  - _self_
+
+seed: 0
+output_dir: outputs/${now:%Y-%m-%d_%H-%M-%S}
+
+wandb:
+  mode: offline   # set to "online" after `wandb login`
+  project: hh-npe
+  entity: null

@@ -1,0 +1,19 @@
+# Phase 2 NPE training config. Placeholder.
+name: phase2
+
+locked:
+  beta: 1.0          # β fixed in Phase 2 — only δ, ρ inferred.
+
+n_simulations: null   # set in Phase 2; scale-down on CPU, scale-up on GPU.
+
+embedder:
+  kind: transformer   # alt: mlp
+  d_model: null
+  n_heads: null
+  n_layers: null
+
+training:
+  algorithm: snpe_c
+  max_epochs: null
+  batch_size: null
+  learning_rate: null

@@ -1,0 +1,4 @@
+# Simulation-Based Calibration config. Placeholder.
+name: sbc
+n_simulations: 1000
+n_posterior_samples: 1000

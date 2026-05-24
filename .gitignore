@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# uv / venv
+.venv/
+
+# Hydra
+outputs/
+multirun/
+.hydra/
+
+# W&B
+wandb/
+
+# Data (gated until PSID/SCF access set up)
+data/raw/
+data/processed/
+data/interim/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
