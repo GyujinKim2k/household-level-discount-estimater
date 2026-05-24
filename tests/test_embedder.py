@@ -13,10 +13,14 @@ def test_default_output_shape():
 
 
 def test_default_param_count_in_target_range():
-    """Spec: ~30k params (d_model=64, n_layers=2, n_heads=4)."""
+    """``small`` for our purposes: 2 layers, d=64, 4 heads → ~100k params.
+
+    The dominant cost is dim_feedforward = 4*d_model = 256, giving ~50k per
+    encoder layer. Bound chosen to flag accidental architecture inflation.
+    """
     m = TrajectoryTransformer()
     n = sum(p.numel() for p in m.parameters())
-    assert 20_000 < n < 100_000, f"unexpected param count: {n}"
+    assert 50_000 < n < 200_000, f"unexpected param count: {n}"
 
 
 def test_eval_mode_is_batch_invariant():

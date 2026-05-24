@@ -20,6 +20,12 @@ multirun/
 # W&B
 wandb/
 
+# Local logs (generation, training)
+logs/
+
+# sbi training artifacts
+sbi-logs/
+
 # Data (gated until PSID/SCF access set up)
 data/raw/
 data/processed/
