@@ -1,19 +1,33 @@
-# Phase 2 NPE training config. Placeholder.
+# Phase 2 NPE training config — values pinned 2026-05-24.
 name: phase2
 
 locked:
-  beta: 1.0          # β fixed in Phase 2 — only δ, ρ inferred.
+  beta: 1.0          # β fixed in Phase 2 — only δ and ρ (crra) inferred.
 
-n_simulations: null   # set in Phase 2; scale-down on CPU, scale-up on GPU.
+# Dataset generation (see scripts/generate_dataset.py)
+dataset:
+  n_samples: 8192          # Sobol draws of (delta, crra); power of 2.
+  start_age: 30            # first biennial wave covers ages 30-31.
+  n_waves: 5               # ages 30-39 total.
+  seed: 0
+  path: data/processed/phase2_dataset.pt
 
+# Embedder (small Transformer, per design 2026-05-24)
 embedder:
-  kind: transformer   # alt: mlp
-  d_model: null
-  n_heads: null
-  n_layers: null
+  kind: transformer
+  d_model: 64
+  n_heads: 4
+  n_layers: 2
+  pool: mean              # alt: cls
+  output_dim: 32
 
+# Training (sbi SNPE-C)
 training:
   algorithm: snpe_c
-  max_epochs: null
-  batch_size: null
-  learning_rate: null
+  flow: nsf               # alt: maf
+  num_rounds: 1           # amortized single-round (per headline contribution)
+  max_num_epochs: 200
+  batch_size: 256
+  learning_rate: 5e-4
+  validation_fraction: 0.1
+  stop_after_epochs: 20
