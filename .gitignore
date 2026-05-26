@@ -39,3 +39,7 @@ data/interim/
 .vscode/
 .idea/
 *.swp
+
+
+# Replication package
+replication-package-LLMRT/
