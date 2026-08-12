@@ -40,6 +40,10 @@ data/interim/
 .idea/
 *.swp
 
+# Agent tooling
+graphify-out/
+.serena/
+
 
 # Replication package
 replication-package-LLMRT/

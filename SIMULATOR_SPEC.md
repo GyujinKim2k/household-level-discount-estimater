@@ -2,7 +2,7 @@
 
 **Status:** DRAFT — not yet frozen.
 **Phase:** Phase 1 (MVP).
-**Last updated:** 2026-05-24.
+**Last updated:** 2026-08-09.
 
 This document specifies the lifecycle consumption-saving simulator used to
 generate training data for the household-level NPE. It must be **frozen
@@ -58,19 +58,63 @@ HARK 0.17 `MarkovConsumerType` backward induction. We override HARK's default `I
 
 ## 6. Annual → biennial aggregation rule
 
-To be drafted. NPE inputs are **5-wave biennial trajectories** matching the
-PSID observation schedule. The aggregation rule (which annual variable
-collapses to each biennial wave: end-of-period stock? two-year average flow?
-mid-period snapshot?) is itself a pre-registered modeling choice and will be
-specified here before Phase 4.
+NPE inputs are **5-wave biennial trajectories** matching the PSID observation
+schedule. The aggregation rule is itself a pre-registered modeling choice and
+is fixed as follows. Implemented in `src/hh_npe/data/biennial.py`.
+
+### 6.1 Window definition
+With `age_start_sim = 20` (§2.2) and a first-wave age `start_age`, wave `w`
+(0-indexed) spans annual indices `[t_start + 2w, t_start + 2w + 1]` where
+`t_start = start_age - age_start_sim`. Phase 2 pins `start_age = 30` and
+`n_waves = 5`, so the observation window is **ages 30–39**. A window extending
+past the simulator's final period raises `ValueError` rather than truncating.
+
+### 6.2 Aggregation by variable type
+- **Flows** (`income`, `consumption`) — **summed** over the two annual periods
+  in the window. Matches PSID's retrospective annual-flow questions, which
+  cover the full period between waves rather than a snapshot.
+- **Stocks** (`liquid_assets`) — value at the **end of the second year** of the
+  window. Matches PSID's point-in-time wealth questions.
+
+Feature order is fixed by `biennial.FEATURES = ("income", "consumption",
+"liquid_assets")` and must not be reordered — the embedder's input dimension is
+positional. Output is `(n_households, n_waves, 3)`, dtype `float32`.
+
+### 6.3 Rebirth (single-lineage) filter
+HARK replaces dead agents with newborns (§5), so a raw window can splice two
+different households together. `aggregate_biennial` returns an `alive` mask
+that is False for any wave in which `t_age` is not monotonically non-decreasing
+across the window **or across the boundary from the immediately preceding
+annual period**. Dataset generation keeps only households with `alive` True at
+every wave; at the Phase 2 pilot this retained 8,092 of 8,192 draws (98.8%).
 
 ## 7. Validation targets
 
 - Reproduce HARK / Carroll buffer-stock standard lifecycle profiles
   (income / consumption / wealth means by age). **Phase 1 gate.**
-- Reproduce Laibson et al. published moments at their reported θ̂ ≈
-  (β=0.50, δ=0.99, ρ=1.3). **Phase 1 sanity check** per user decision
-  2026-05-24.
+- Laibson et al. comparison. Their MSM estimates, read from the replication
+  package (`LifecycleSimulation/output/simulations/table3/EDFbatch_table3*.mat`,
+  `MSMout.optprefs` and `MSMout.optprefs_stderr.full`):
+
+  | Specification | β | δ | ρ | q |
+  |---|---|---|---|---|
+  | Benchmark (naive quasi-hyperbolic) | 0.5305 (0.114) | 0.9891 (0.0051) | 1.9355 (0.435) | 77.2 |
+  | Exponential restriction (β ≡ 1) | 1 (imposed) | 0.9600 (0.0053) | 1.4663 (0.226) | 759.6 |
+
+  **The exponential row is the comparable one for Phases 1–2**, which lock β=1
+  (§2.1) and expose no β parameter at all. Both δ=0.9600 and ρ=1.4663 fall
+  inside the Phase 2 prior box (§2.3), so the pilot posterior can be checked
+  against them directly.
+
+  Note that this is a **parameter-level** comparison only. Their target moments
+  (%Visa, meanVisa, wealth | debt, wealth | no debt) are credit-card moments,
+  and the Phase 1 MVP has no credit cards (`BoroCnstArt = 0`, §2.2). A
+  moment-level replication is therefore **deferred to Phase 3**, when credit
+  cards and the illiquid asset enter.
+
+  Supersedes the earlier target of θ̂ ≈ (β=0.50, δ=0.99, ρ=1.3) recorded
+  2026-05-24; the ρ value there was wrong by ~1.5 SE and the β value is not
+  representable in a Phase 1–2 model.
 
 ## 8. Pre-registration commitments
 

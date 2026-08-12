@@ -1,6 +1,6 @@
 """Annual simulator output → biennial 5-wave trajectories.
 
-Aggregation rule (per SIMULATOR_SPEC.md §6, pinned 2026-05-24):
+Aggregation rule (per SIMULATOR_SPEC.md §6, pinned 2026-08-09):
 - **Flows** (income, consumption): summed across the 2-year window.
 - **Stocks** (liquid_assets): value at the end of the second year of the window.
 
