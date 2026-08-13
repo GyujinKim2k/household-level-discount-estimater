@@ -69,8 +69,18 @@ class ModelSpec:
     chunk: int = 24  # current-X rows per vectorized block; caps peak memory
 
 
-#: Coarsened grid used for NPE dataset generation (~80 x 40).
+#: Coarsest grid (81x46). Cheap but carries 3.15 se of discretization error
+#: against the full grid -- too much for a dataset meant to be comparable to
+#: Laibson et al.'s estimates. Kept for quick smoke runs only.
 COARSE = ModelSpec(xjump=4000.0, x_cells_per_step=16, zjump=16000.0, z_cells_per_step=5)
+
+#: Working grid for Phase 3 dataset generation (107x56). Measured at 0.94 se of
+#: discretization error against the full grid -- under one standard error of the
+#: target moments -- at roughly 1/7 the cost. See scripts/validate_twoasset.py.
+MID = ModelSpec(xjump=2000.0, x_cells_per_step=25, zjump=8000.0, z_cells_per_step=7)
+
+#: Named grids accepted by ``--grid``. ``full`` is Laibson et al.'s exact 190x84.
+GRIDS = {"coarse": COARSE, "mid": MID, "full": ModelSpec()}
 
 
 @dataclass

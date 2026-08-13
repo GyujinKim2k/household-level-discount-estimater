@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from math import ceil
 from pathlib import Path
 
 import numpy as np
@@ -41,16 +42,63 @@ from hh_npe.utils.seeding import seed_all
 log = logging.getLogger("generate_dataset")
 
 
+def _shard_dir(out: Path) -> Path:
+    return out.parent / (out.stem + "_shards")
+
+
+def assemble(out: Path, theta_np: np.ndarray, log_fn) -> bool:
+    """Build the ``.pt`` dataset from whatever contiguous shards exist.
+
+    Only a contiguous prefix starting at shard 0 is used. That is deliberate:
+    scrambled Sobol keeps its low-discrepancy balance on power-of-2 *prefixes*,
+    so a prefix is a valid smaller dataset while an arbitrary subset is not.
+    """
+    shards = sorted(_shard_dir(out).glob("shard_*.npz"))
+    if not shards:
+        log_fn("No shards found.")
+        return False
+
+    xs, alives, expected = [], [], 0
+    for sf in shards:
+        d = np.load(sf)
+        if int(d["lo"]) != expected:  # gap - stop at the contiguous prefix
+            break
+        xs.append(d["x"])
+        alives.append(d["alive"])
+        expected = int(d["hi"])
+
+    x_np = np.concatenate(xs)
+    alive_np = np.concatenate(alives)
+    n = x_np.shape[0]
+    fully_alive = alive_np.all(axis=1)
+    n_alive = int(fully_alive.sum())
+    log_fn(
+        f"Assembling {n} contiguous samples from {len(xs)} shards; "
+        f"survival filter keeps {n_alive} ({100 * n_alive / n:.1f}%)."
+    )
+
+    theta = torch.from_numpy(theta_np[:n][fully_alive]).float()
+    x = torch.from_numpy(x_np[fully_alive]).float()
+    save_dataset(theta, x, out)
+    log_fn(f"Saved (theta {tuple(theta.shape)}, x {tuple(x.shape)}) to {out}")
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--simulator", choices=sorted(SIMULATORS), default="twoasset")
-    parser.add_argument("--grid", choices=["coarse", "full"], default="coarse",
-                        help="twoasset only: 'full' is Laibson et al.'s exact "
-                             "190x84 grid, roughly 18x slower than 'coarse'.")
-    parser.add_argument("--n_samples", type=int, default=8192,
-                        help="Total Sobol draws. Power of 2 preferred.")
-    parser.add_argument("--start_age", type=int, default=30,
-                        help="First wave's first year. Default 30.")
+    parser.add_argument("--grid", choices=["coarse", "mid", "full"], default="mid",
+                        help="'mid' (107x56) carries 0.94 se of discretization "
+                             "error and is the Phase 3 working choice; 'full' is "
+                             "Laibson et al.'s exact 190x84 and is ~7x slower.")
+    parser.add_argument("--n_samples", type=int, default=32768,
+                        help="Total Sobol draws. Powers of 2 preferred - Sobol "
+                             "keeps its balance on power-of-2 prefixes, so "
+                             "partial runs assemble into valid datasets.")
+    parser.add_argument("--block", type=int, default=512,
+                        help="Samples per checkpoint shard. A multi-day run must "
+                             "survive interruption; shards let it resume.")
+    parser.add_argument("--start_age", type=int, default=30)
     parser.add_argument("--n_waves", type=int, default=5)
     parser.add_argument("--wave_years", type=int, default=2,
                         help="Years per wave. 2 = biennial (PSID); 1 = annual.")
@@ -59,8 +107,10 @@ def main() -> None:
                         help="joblib parallelism; -1 uses all cores.")
     parser.add_argument("--out", type=Path, default=None,
                         help="Defaults to data/processed/<simulator>_dataset.pt")
-    parser.add_argument("--verbose", type=int, default=5,
-                        help="joblib verbose level (0 silent, 10 every batch).")
+    parser.add_argument("--assemble_only", action="store_true",
+                        help="Build the .pt from existing shards and exit. Use to "
+                             "train on a partial run without stopping it.")
+    parser.add_argument("--verbose", type=int, default=0)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -69,43 +119,65 @@ def main() -> None:
     box = PHASE3 if args.simulator == "twoasset" else PriorBox()
     out = args.out or Path(f"data/processed/{args.simulator}_dataset.pt")
     fn = SIMULATORS[args.simulator]
+    theta_np = sample_sobol(args.n_samples, box, seed=args.seed)
 
+    if args.assemble_only:
+        assemble(out, theta_np, log.info)
+        return
+
+    shard_dir = _shard_dir(out)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    n_blocks = ceil(args.n_samples / args.block)
+    done = sum(1 for b in range(n_blocks) if (shard_dir / f"shard_{b:05d}.npz").exists())
     log.info(
         f"simulator={args.simulator} grid={args.grid} params={box.names} "
         f"waves={args.n_waves}x{args.wave_years}y from age {args.start_age}"
     )
-    log.info(f"Sobol-sampling {args.n_samples} draws...")
-    theta_np = sample_sobol(args.n_samples, box, seed=args.seed)
+    log.info(
+        f"{args.n_samples} draws in {n_blocks} shards of {args.block}; "
+        f"{done} already complete, {n_blocks - done} to go. Shards: {shard_dir}"
+    )
 
-    log.info(f"Generating trajectories with n_jobs={args.n_jobs} ...")
-    t0 = time.time()
-    results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(
-        delayed(fn)(
-            theta_np[i], args.seed + i + 1,
-            args.start_age, args.n_waves, args.wave_years, args.grid,
+    t_start = time.time()
+    completed_now = 0
+    for b in range(n_blocks):
+        sf = shard_dir / f"shard_{b:05d}.npz"
+        if sf.exists():
+            continue
+        lo, hi = b * args.block, min((b + 1) * args.block, args.n_samples)
+        t0 = time.time()
+        results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(
+            delayed(fn)(
+                theta_np[i], args.seed + i + 1,
+                args.start_age, args.n_waves, args.wave_years, args.grid,
+            )
+            for i in range(lo, hi)
         )
-        for i in range(args.n_samples)
-    )
-    elapsed = time.time() - t0
-    log.info(
-        f"Generated {args.n_samples} samples in {elapsed:.1f}s "
-        f"({elapsed / args.n_samples * 1000:.1f} ms/sample)"
-    )
+        # Write to a temp name then rename, so an interrupted write cannot leave
+        # a half-formed shard that a resume would trust. The temp name must
+        # already end in .npz (np.savez appends the suffix otherwise, which
+        # breaks the rename) and must not match the shard_*.npz glob.
+        tmp = shard_dir / f".tmp_shard_{b:05d}.npz"
+        np.savez(
+            tmp,
+            x=np.stack([r[0] for r in results]),
+            alive=np.stack([r[1] for r in results]),
+            lo=lo, hi=hi,
+        )
+        tmp.rename(sf)
 
-    x_np = np.stack([r[0] for r in results])
-    alive_np = np.stack([r[1] for r in results])
-    fully_alive = alive_np.all(axis=1)
-    n_alive = int(fully_alive.sum())
-    log.info(
-        f"Survival filter: {n_alive}/{args.n_samples} households "
-        f"({100 * n_alive / args.n_samples:.1f}%) fully alive across all waves."
-    )
+        completed_now += 1
+        dt = time.time() - t0
+        rate = (time.time() - t_start) / completed_now
+        remaining = (n_blocks - done - completed_now) * rate
+        log.info(
+            f"shard {b + 1}/{n_blocks} ({lo}-{hi}) in {dt / 60:.1f} min "
+            f"[{dt / (hi - lo):.1f} s/sample]  "
+            f"ETA {remaining / 3600:.1f} h ({remaining / 86400:.2f} d)"
+        )
 
-    theta = torch.from_numpy(theta_np[fully_alive]).float()
-    x = torch.from_numpy(x_np[fully_alive]).float()
-
-    save_dataset(theta, x, out)
-    log.info(f"Saved (theta {tuple(theta.shape)}, x {tuple(x.shape)}) to {out}")
+    log.info(f"All shards complete in {(time.time() - t_start) / 3600:.2f} h")
+    assemble(out, theta_np, log.info)
 
 
 if __name__ == "__main__":

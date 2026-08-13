@@ -40,13 +40,15 @@ def simulate_one_hark(
 
 def simulate_one_twoasset(
     theta: np.ndarray, sim_seed: int, start_age: int, n_waves: int,
-    wave_years: int, grid: str = "coarse",
+    wave_years: int, grid: str = "mid",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Phase 3 path: credit cards, illiquid asset, naive quasi-hyperbolic beta."""
-    from hh_npe.simulator.twoasset import COARSE, ModelSpec, simulate, solve
+    from hh_npe.simulator.twoasset import GRIDS, simulate, solve
 
     beta, delta, crra = (float(v) for v in theta)
-    spec = COARSE if grid == "coarse" else ModelSpec()
+    if grid not in GRIDS:
+        raise ValueError(f"unknown grid {grid!r}; expected one of {sorted(GRIDS)}")
+    spec = GRIDS[grid]
     sol = solve(beta, delta, crra, spec)
     panel = simulate(sol, n_households=1, seed=sim_seed)
     x, alive = aggregate_waves(
