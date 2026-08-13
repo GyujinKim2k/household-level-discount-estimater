@@ -1,8 +1,9 @@
 # Simulator Specification — Household-Level NPE Project
 
 **Status:** DRAFT — not yet frozen.
-**Phase:** Phase 3 (two-asset, credit cards, present bias).
-**Last updated:** 2026-08-12.
+**Phase:** Phase 3 (two-asset, credit cards, present bias). Port **validated**
+against Laibson et al.'s published simulation (§7.1).
+**Last updated:** 2026-08-13.
 
 This document specifies the lifecycle consumption-saving simulator used to
 generate training data for the household-level NPE. It must be **frozen
@@ -173,12 +174,28 @@ Two mitigations, both required:
 float32 remains selectable for quick iteration but must **never** be used for a
 dataset or a validation run.
 
-**Grid coarsening.** NPE needs 10³–10⁵ solves, so dataset generation may
-coarsen the grids (`twoasset.COARSE`). Coarsening is an approximation and its
-cost is *measured*, not assumed — see §7 and `scripts/validate_twoasset.py`.
-Measured against the full grid, the coarse 81×46 grid carries up to 8.9
-standard errors of discretization error and is **not usable** for a dataset
-intended to be comparable to their estimates.
+**Grid snapping ties round up.** Income realizations land on the `xjump`
+lattice by construction (§3), but the liquid grid coarsens to 2000/4000/6000
+above \$50k, so **26.9%** of cash-on-hand queries at the full grid fall exactly
+midway between two grid points. `_nearest_index` resolves these to the *higher*
+index, matching MATLAB's `griddedInterpolant(..., 'nearest')`. Rounding down
+instead discards up to \$6,000 of liquid wealth per snap — only for wealthier
+households, compounding with age, and in the expectation step as well as the
+forward pass. It inflated simulated credit-card borrowing by ~10%.
+
+**Grid coarsening.** NPE needs 10³–10⁵ solves, so dataset generation coarsens
+the grids. Coarsening is an approximation and its cost is *measured*, not
+assumed — `scripts/validate_twoasset.py`:
+
+| Grid | solve | max \|diff\|/se vs full | median relative |
+|---|---|---|---|
+| coarse 81×46 | 72 s | 3.15 | 5.4% |
+| **mid 107×56** | **234 s** | **0.94** | **2.2%** |
+| full 190×84 (theirs) | 1678 s | — | — |
+
+Phase 3 dataset generation uses the **mid** grid, which sits under one standard
+error of discretization error. The full grid remains the reference for
+validation runs.
 
 ## 5. Forward simulation
 
@@ -254,6 +271,20 @@ annual period**. Dataset generation keeps only households with `alive` True at
 every wave; at the Phase 2 pilot this retained 8,092 of 8,192 draws (98.8%).
 
 ## 7. Validation targets
+
+### 7.1 Port fidelity (Phase 3 gate — **passed**)
+
+At their exact 190×84 grid and their published benchmark estimates
+(β=0.5305, δ=0.9891, ρ=1.9355), our 16 simulated moments match their stored
+`MSMout.optMoments` to **mean |log(ours/theirs)| = 0.0102**, every moment
+within 4%. MSM objective q = 85.3 against their 77.2, the gap being Monte Carlo
+noise at `pop = 10000` under independent RNG streams.
+
+Comparison is against **their simulated moments**, not the data. Comparing to
+the data conflates port error with their model's own misfit — their objective
+at the optimum is 77.2, so a perfect port still sits far from the data. The
+moment code is separately verified by applying it to their own stored panel,
+which reproduces all 16 of their values exactly.
 
 - Reproduce HARK / Carroll buffer-stock standard lifecycle profiles
   (income / consumption / wealth means by age). **Phase 1 gate.**

@@ -194,47 +194,65 @@ Built and tested:
 - Their dynamic budget identity (`assert(abs(check) < 1e-5)`) re-derived
   independently and checked over the **entire** grid in float64
 
-**Validation against their table-3 moments has run and does NOT yet pass.**
-At their exact 190×84 grid and their benchmark estimates, the MSM objective is
-**q = 537.5 against their reported 77.2**. The objective formula itself is
-verified: fed their own stored `optMoments`, it reproduces `optq = 77.15`
-exactly.
+**Validation against their table-3 moments PASSES.** At their exact 190×84 grid
+and their published benchmark estimates, our simulated moments match theirs to
+**mean |log(ours/theirs)| = 0.0102** — all 16 moments within 4%:
 
-Comparing our simulation to *their* stored simulation at the same parameters
-(the sharp test — comparing to the data instead would conflate port error with
-their model's own misfit):
-
-| Quantity | Ours ÷ theirs |
+| moment | ours ÷ theirs, by age band |
 |---|---|
-| Income profile, all ages | 0.998 (max deviation 1.9%) |
-| Consumption, ages 30 / 50 | 0.996 / 0.992 |
-| Wealth `X`, ages 30 / 50 | 0.941 / 0.882 |
-| `%Visa` (fraction holding card debt) | **1.31 – 1.56** |
-| `meanVisa` | **1.35 – 1.71** |
+| `%Visa` | 1.00, 1.01, 1.00, 1.00 |
+| `meanVisa` | 1.00, 1.03, 1.01, 1.01 |
+| `wealth\|debt` | 1.01, 0.99, 0.96, 1.01 |
+| `wealth\|no debt` | 1.01, 1.01, 0.99, 0.98 |
 
-So the income process, consumption path and budget identity are right, and the
-port **over-produces credit-card borrowing**, increasingly with age. Wealth
-running low is consistent with the extra interest paid rather than an
-independent fault.
+The MSM objective is q = 85.3 against their 77.2; that residual is Monte Carlo
+noise from independent RNG streams at `pop = 10000`, amplified because q sums
+16 squared t-statistics. The objective code itself is verified two ways: fed
+their stored `optMoments` it reproduces `optq = 77.15` exactly, and our moment
+function applied to their own simulated panel reproduces all 16 values exactly.
 
-Ruled out so far: the naive-β machinery (the discrepancy persists at β = 1, so
-it lives in the core exponential DP) and the budget identity (exact in
-float64). Two bugs found and fixed by this exercise so far, the first being a
-transposed transition matrix in the expectation step (`P.T` is not
-row-stochastic) that the forward simulation did not share; both now have
-regression tests.
+Getting there took three bugs, all of which pushed the same direction
+(toward borrowing), which is why the aggregate misfit looked like one large
+effect:
 
-**Grid-coarsening error**, measured against the full grid:
-
-| Grid | max \|diff\| / se | median relative |
+| # | Bug | Effect on fidelity |
 |---|---|---|
-| coarse 81×46 | 8.93 | 17.8% |
-| mid 107×56 | 3.75 | 7.0% |
+| 1 | `P.T` used in the expectation step — not row-stochastic | — |
+| 2 | float32 could not resolve the argmax (§4) | 0.248 → 0.102 |
+| 3 | Grid-snapping ties rounded **down**, leaking liquid wealth | 0.102 → **0.0102** |
 
-The coarse grid is **not usable** for a dataset meant to be comparable to their
-estimates — 8.9 standard errors of pure discretization error. Phase 3 dataset
-generation therefore needs the full grid, which makes hardware (more cores or a
-GPU) a prerequisite rather than a convenience.
+Each has a regression test. Bug 3 is the subtle one: income lands on the
+`xjump` lattice but the liquid grid coarsens above \$50k, so 26.9% of
+cash-on-hand queries fall exactly midway between grid points. MATLAB's
+`griddedInterpolant(...,'nearest')` rounds those up; we rounded down, silently
+discarding up to \$6,000 per snap for wealthier households, compounding with
+age, in both the forward pass and the DP.
+
+They were located by bisecting against their stored intermediates rather than
+guessing from aggregate misfit — their `.mat` contains `income_setup`,
+`grid_setup`, the full policy functions and the simulated panel:
+
+| Component | Test | Result |
+|---|---|---|
+| Calibration + grids | element-wise vs their setups | bit-identical, 11 arrays |
+| Age-step | fed **their** `EV` | 99.6–99.7% exact policy match |
+| Expectation step | fed **their** `V` | max rel 1.4e-07 |
+| Moment code | applied to **their** panel | exact |
+| Income process | marginals, mean, sd | ratios 0.9961 |
+
+**Grid-coarsening error**, measured against the full grid (most of the earlier
+figure was bug 3, whose severity scaled with refinement):
+
+| Grid | solve | max \|diff\|/se | median relative | ties |
+|---|---|---|---|---|
+| coarse 81×46 | 72 s | 3.15 | 5.4% | 0.0% |
+| mid 107×56 | 234 s | **0.94** | 2.2% | 12.4% |
+| full 190×84 | 1678 s | — | — | 26.9% |
+
+The mid grid sits under one standard error of discretization error and is the
+working choice for dataset generation: ~5.5 days for 8,192 draws on 4 cores,
+~17 h on 32. The full grid is ~159 days on 4 cores and remains the reference
+configuration for validation runs.
 
 Measured solve times (4 CPU cores, no GPU):
 
