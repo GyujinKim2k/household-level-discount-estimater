@@ -1,0 +1,43 @@
+# Phase 3 NPE config — credit cards + illiquid asset.
+# Observation window unchanged from Phases 1-2: biennial, matching PSID.
+name: phase3
+simulator: twoasset   # scripts/generate_dataset.py --simulator
+grid: coarse          # 'full' = Laibson et al.'s exact 190x84 grid
+
+# β is UNLOCKED in Phase 3 (was locked at 1.0 in Phases 1-2).
+# Naive quasi-hyperbolic, matching Laibson et al.'s benchmark (naif=1, betahat=1).
+locked: {}
+
+prior:
+  beta:  {low: 0.30, high: 1.00}
+  delta: {low: 0.85, high: 1.00}
+  crra:  {low: 0.50, high: 5.00}
+
+# Dataset generation (see scripts/generate_dataset.py)
+dataset:
+  n_samples: 8192          # Sobol draws; power of 2.
+  start_age: 30            # first wave covers ages 30-31.
+  n_waves: 5               # ages 30-39, two years per wave.
+  wave_years: 2            # biennial — PSID post-1997 schedule.
+  seed: 0
+  path: data/processed/phase3_dataset.pt
+
+# Embedder — seq_len is taken from dataset.n_waves at build time.
+embedder:
+  kind: transformer
+  d_model: 64
+  n_heads: 4
+  n_layers: 2
+  pool: mean              # alt: cls
+  output_dim: 32
+
+# Training (sbi SNPE-C)
+training:
+  algorithm: snpe_c
+  flow: nsf               # alt: maf
+  num_rounds: 1           # amortized single-round (per headline contribution)
+  max_num_epochs: 200
+  batch_size: 256
+  learning_rate: 5e-4
+  validation_fraction: 0.1
+  stop_after_epochs: 20

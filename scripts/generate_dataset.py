@@ -1,16 +1,25 @@
-"""Generate the Phase 2 training dataset.
+"""Generate the NPE training dataset.
 
-Sobol-samples ``(delta, crra)``, solves the lifecycle for each draw, simulates
-one household trajectory, biennial-aggregates to 5 waves starting at age 30,
-filters out households whose lineage was replaced by a newborn within the
-window, and saves the resulting ``(theta, x)`` to a ``.pt`` file.
+Sobol-samples the structural parameters, solves the lifecycle model for each
+draw, simulates one household trajectory, aggregates to biennial observation
+waves, drops households whose lineage was replaced by a newborn inside the
+window, and saves ``(theta, x)`` to a ``.pt`` file.
+
+Two simulators are available:
+
+``twoasset`` (Phase 3, default)
+    Port of Laibson et al.: credit cards, illiquid asset, naive quasi-hyperbolic
+    discounting. Estimates ``(beta, delta, crra)``. Slow -- one solve is tens of
+    seconds to ~10 minutes depending on ``--grid``.
+
+``hark`` (Phases 1-2)
+    Single liquid asset, no borrowing, ``beta`` locked at 1. Estimates
+    ``(delta, crra)``. Kept so the Phase 2 results stay reproducible.
 
 Usage::
 
     uv run python scripts/generate_dataset.py --n_samples 32 --n_jobs 4
-
-For the planned Phase 2 pilot of 8,192 samples on CPU, expect 4-8 hours
-depending on core count.
+    uv run python scripts/generate_dataset.py --simulator hark
 """
 
 from __future__ import annotations
@@ -24,57 +33,32 @@ import numpy as np
 import torch
 from joblib import Parallel, delayed
 
-from hh_npe.data.biennial import aggregate_biennial
 from hh_npe.data.dataset import save_dataset
-from hh_npe.npe.prior import PriorBox, sample_sobol
-from hh_npe.simulator.forward import simulate_households
-from hh_npe.simulator.lifecycle import build_lifecycle_agent, solve_lifecycle
+from hh_npe.npe.prior import PHASE3, PriorBox, sample_sobol
+from hh_npe.simulator.dispatch import SIMULATORS
 from hh_npe.utils.seeding import seed_all
-
-AGE_START_SIM = 20
-AGE_END_SIM = 90
 
 log = logging.getLogger("generate_dataset")
 
 
-def simulate_one(
-    delta: float,
-    crra: float,
-    sim_seed: int,
-    start_age: int,
-    n_waves: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Solve + simulate + biennial-aggregate one household."""
-    agent = build_lifecycle_agent(
-        delta=delta,
-        crra=crra,
-        age_start=AGE_START_SIM,
-        age_end=AGE_END_SIM,
-        n_agents=1,
-    )
-    solve_lifecycle(agent)
-    panel = simulate_households(agent, n_households=1, seed=sim_seed)
-    x, alive = aggregate_biennial(
-        panel,
-        age_start_sim=AGE_START_SIM,
-        start_age=start_age,
-        n_waves=n_waves,
-    )
-    return x[0], alive[0]
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--simulator", choices=sorted(SIMULATORS), default="twoasset")
+    parser.add_argument("--grid", choices=["coarse", "full"], default="coarse",
+                        help="twoasset only: 'full' is Laibson et al.'s exact "
+                             "190x84 grid, roughly 18x slower than 'coarse'.")
     parser.add_argument("--n_samples", type=int, default=8192,
-                        help="Total Sobol draws of (delta, crra). Power of 2 preferred.")
+                        help="Total Sobol draws. Power of 2 preferred.")
     parser.add_argument("--start_age", type=int, default=30,
                         help="First wave's first year. Default 30.")
     parser.add_argument("--n_waves", type=int, default=5)
+    parser.add_argument("--wave_years", type=int, default=2,
+                        help="Years per wave. 2 = biennial (PSID); 1 = annual.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n_jobs", type=int, default=-1,
                         help="joblib parallelism; -1 uses all cores.")
-    parser.add_argument("--out", type=Path,
-                        default=Path("data/processed/phase2_dataset.pt"))
+    parser.add_argument("--out", type=Path, default=None,
+                        help="Defaults to data/processed/<simulator>_dataset.pt")
     parser.add_argument("--verbose", type=int, default=5,
                         help="joblib verbose level (0 silent, 10 every batch).")
     args = parser.parse_args()
@@ -82,18 +66,23 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     seed_all(args.seed)
 
-    log.info(f"Sobol-sampling {args.n_samples} (delta, crra) from PriorBox()...")
-    theta_np = sample_sobol(args.n_samples, PriorBox(), seed=args.seed)
+    box = PHASE3 if args.simulator == "twoasset" else PriorBox()
+    out = args.out or Path(f"data/processed/{args.simulator}_dataset.pt")
+    fn = SIMULATORS[args.simulator]
+
+    log.info(
+        f"simulator={args.simulator} grid={args.grid} params={box.names} "
+        f"waves={args.n_waves}x{args.wave_years}y from age {args.start_age}"
+    )
+    log.info(f"Sobol-sampling {args.n_samples} draws...")
+    theta_np = sample_sobol(args.n_samples, box, seed=args.seed)
 
     log.info(f"Generating trajectories with n_jobs={args.n_jobs} ...")
     t0 = time.time()
     results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(
-        delayed(simulate_one)(
-            float(theta_np[i, 0]),
-            float(theta_np[i, 1]),
-            args.seed + i + 1,
-            args.start_age,
-            args.n_waves,
+        delayed(fn)(
+            theta_np[i], args.seed + i + 1,
+            args.start_age, args.n_waves, args.wave_years, args.grid,
         )
         for i in range(args.n_samples)
     )
@@ -115,8 +104,8 @@ def main() -> None:
     theta = torch.from_numpy(theta_np[fully_alive]).float()
     x = torch.from_numpy(x_np[fully_alive]).float()
 
-    save_dataset(theta, x, args.out)
-    log.info(f"Saved (theta {tuple(theta.shape)}, x {tuple(x.shape)}) to {args.out}")
+    save_dataset(theta, x, out)
+    log.info(f"Saved (theta {tuple(theta.shape)}, x {tuple(x.shape)}) to {out}")
 
 
 if __name__ == "__main__":

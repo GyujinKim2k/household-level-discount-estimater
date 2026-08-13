@@ -1,6 +1,6 @@
-"""Small Transformer summary network for 5-wave biennial household trajectories.
+"""Small Transformer summary network for fixed-length household wave trajectories.
 
-Input:  ``(batch, seq_len=5, n_features=3)`` — biennial waves x (income,
+Input:  ``(batch, seq_len, n_features=3)`` — observation waves x (income,
         consumption, liquid_assets).
 Output: ``(batch, output_dim=32)`` — fixed-dim embedding for the NPE
         density estimator to condition on.

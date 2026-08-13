@@ -1,4 +1,4 @@
-"""Sobol-based prior sampler for (delta, crra), plus an sbi-compatible BoxUniform.
+"""Sobol-based prior sampler over the structural parameters, plus a BoxUniform.
 
 The Sobol sequence is used to draw parameter samples that we'll feed through
 the simulator to generate ``(theta, x)`` training pairs. The companion
@@ -25,24 +25,58 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class PriorBox:
-    """Box bounds on (delta, crra). Pinned values match SIMULATOR_SPEC.md."""
+    """Box bounds on the estimated structural parameters.
+
+    Two-parameter by default — ``(delta, crra)``, the Phase 1-2 setup with
+    present bias locked at ``beta = 1``. Setting ``beta_low``/``beta_high``
+    adds ``beta`` as a third estimated parameter and puts it **first**, matching
+    Laibson et al.'s ``prefs`` ordering ``[beta delta rho]``.
+
+    Pinned values match SIMULATOR_SPEC.md.
+    """
 
     delta_low: float = 0.85
     delta_high: float = 1.00
     crra_low: float = 0.5
     crra_high: float = 5.0
+    beta_low: float | None = None
+    beta_high: float | None = None
+
+    def __post_init__(self) -> None:
+        if (self.beta_low is None) != (self.beta_high is None):
+            raise ValueError(
+                "beta_low and beta_high must both be set or both be None; got "
+                f"{self.beta_low} and {self.beta_high}"
+            )
+        for lo, hi, name in zip(self.low, self.high, self.names):
+            if not lo < hi:
+                raise ValueError(f"{name}: need low < high, got {lo} >= {hi}")
+
+    @property
+    def estimates_beta(self) -> bool:
+        return self.beta_low is not None
 
     @property
     def low(self) -> np.ndarray:
-        return np.array([self.delta_low, self.crra_low])
+        base = [self.delta_low, self.crra_low]
+        return np.array(([self.beta_low] if self.estimates_beta else []) + base)
 
     @property
     def high(self) -> np.ndarray:
-        return np.array([self.delta_high, self.crra_high])
+        base = [self.delta_high, self.crra_high]
+        return np.array(([self.beta_high] if self.estimates_beta else []) + base)
 
     @property
-    def names(self) -> tuple[str, str]:
-        return ("delta", "crra")
+    def names(self) -> tuple[str, ...]:
+        return (("beta",) if self.estimates_beta else ()) + ("delta", "crra")
+
+    @property
+    def n_params(self) -> int:
+        return len(self.names)
+
+
+#: Phase 3 prior: present bias unlocked (configs/npe/phase3.yaml).
+PHASE3 = PriorBox(beta_low=0.30, beta_high=1.00)
 
 
 def sample_sobol(
@@ -53,11 +87,12 @@ def sample_sobol(
     """Draw ``n_samples`` quasi-random points from the uniform prior on ``box``.
 
     Uses a scrambled Sobol sequence (``scipy.stats.qmc.Sobol``); returns an
-    array of shape ``(n_samples, 2)`` with columns ``[delta, crra]``.
+    array of shape ``(n_samples, box.n_params)`` with columns ordered as
+    ``box.names``.
     """
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
-    engine = qmc.Sobol(d=2, scramble=True, seed=seed)
+    engine = qmc.Sobol(d=box.n_params, scramble=True, seed=seed)
     u = engine.random(n_samples)
     return qmc.scale(u, box.low, box.high)
 

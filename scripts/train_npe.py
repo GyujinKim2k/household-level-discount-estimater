@@ -5,7 +5,7 @@ Usage::
     uv run python scripts/train_npe.py
     uv run python scripts/train_npe.py npe.training.max_num_epochs=50 seed=1
 
-Reads :file:`configs/config.yaml` (composing ``simulator/mvp``, ``npe/phase2``,
+Reads :file:`configs/config.yaml` (composing ``simulator/mvp``, ``npe/phase3``,
 ``eval/sbc``). Writes ``posterior.pt`` to the Hydra-resolved output dir.
 """
 
@@ -23,6 +23,23 @@ from hh_npe.npe.embedder import TrajectoryTransformer
 from hh_npe.npe.prior import PriorBox
 from hh_npe.npe.train import save_posterior, train_npe
 from hh_npe.utils.seeding import seed_all
+
+
+def build_prior_box(cfg: DictConfig) -> PriorBox:
+    """Prior bounds, from ``npe.prior`` (Phase 3) or ``simulator.prior`` (1-2).
+
+    Phase 3 unlocks ``beta``, so its bounds live with the NPE config rather
+    than the simulator config; ``beta`` is absent for Phases 1-2, which lock it
+    at 1.0.
+    """
+    src = cfg.npe.get("prior") or cfg.simulator.prior
+    kwargs = dict(
+        delta_low=src.delta.low, delta_high=src.delta.high,
+        crra_low=src.crra.low, crra_high=src.crra.high,
+    )
+    if "beta" in src and isinstance(src.beta, DictConfig):
+        kwargs.update(beta_low=src.beta.low, beta_high=src.beta.high)
+    return PriorBox(**kwargs)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
@@ -49,12 +66,8 @@ def main(cfg: DictConfig) -> None:
         output_dim=npe_cfg.embedder.output_dim,
     )
 
-    box = PriorBox(
-        delta_low=cfg.simulator.prior.delta.low,
-        delta_high=cfg.simulator.prior.delta.high,
-        crra_low=cfg.simulator.prior.crra.low,
-        crra_high=cfg.simulator.prior.crra.high,
-    )
+    box = build_prior_box(cfg)
+    log.info(f"Estimating {box.names} over {box.low} .. {box.high}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info(f"Training on device={device}")

@@ -1,5 +1,6 @@
 # Phase 2 NPE training config — values pinned 2026-05-24.
 name: phase2
+simulator: hark       # single liquid asset, beta locked at 1
 
 locked:
   beta: 1.0          # β fixed in Phase 2 — only δ and ρ (crra) inferred.
@@ -9,6 +10,7 @@ dataset:
   n_samples: 8192          # Sobol draws of (delta, crra); power of 2.
   start_age: 30            # first biennial wave covers ages 30-31.
   n_waves: 5               # ages 30-39 total.
+  wave_years: 2            # biennial — PSID post-1997 schedule.
   seed: 0
   path: data/processed/phase2_dataset.pt
 
