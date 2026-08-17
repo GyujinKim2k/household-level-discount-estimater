@@ -42,6 +42,39 @@ from hh_npe.utils.seeding import seed_all
 log = logging.getLogger("generate_dataset")
 
 
+def generate_block_gpu(
+    thetas: np.ndarray, seed_base: int, start_age: int, n_waves: int,
+    wave_years: int, grid: str, theta_batch: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve a block of draws on the GPU, then forward-simulate on the CPU.
+
+    The backward induction is the only expensive part and is batched over draws;
+    the forward pass and wave aggregation are milliseconds and stay on the CPU,
+    reusing exactly the code the CPU path uses.
+    """
+    from hh_npe.data.waves import FEATURES_TWOASSET, aggregate_waves
+    from hh_npe.simulator.dispatch import AGE_START_SIM
+    from hh_npe.simulator.twoasset import GRIDS, simulate
+    from hh_npe.simulator.twoasset_gpu import solve_batch
+
+    # Consume each sub-batch before solving the next: a Solution holds ~58 MB of
+    # policy arrays, so accumulating a whole large block would exhaust host RAM.
+    xs, alives = [], []
+    for s0 in range(0, len(thetas), theta_batch):
+        s1 = min(s0 + theta_batch, len(thetas))
+        sols = solve_batch(thetas[s0:s1], GRIDS[grid], theta_batch=theta_batch)
+        for i, sol in enumerate(sols):
+            panel = simulate(sol, n_households=1, seed=seed_base + s0 + i)
+            x, alive = aggregate_waves(
+                panel, age_start_sim=AGE_START_SIM, start_age=start_age,
+                n_waves=n_waves, wave_years=wave_years, features=FEATURES_TWOASSET,
+            )
+            xs.append(x[0])
+            alives.append(alive[0])
+        del sols
+    return np.stack(xs), np.stack(alives)
+
+
 def _shard_dir(out: Path) -> Path:
     return out.parent / (out.stem + "_shards")
 
@@ -110,6 +143,13 @@ def main() -> None:
     parser.add_argument("--assemble_only", action="store_true",
                         help="Build the .pt from existing shards and exit. Use to "
                              "train on a partial run without stopping it.")
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu",
+                        help="'cuda' batches the backward induction on GPU "
+                             "(~4.8 s/solve at the full grid vs ~1678 s on one "
+                             "CPU core).")
+    parser.add_argument("--theta_batch", type=int, default=16,
+                        help="cuda only: draws solved simultaneously. Throughput "
+                             "is flat above ~8, so this mainly trades memory.")
     parser.add_argument("--verbose", type=int, default=0)
     args = parser.parse_args()
 
@@ -146,24 +186,27 @@ def main() -> None:
             continue
         lo, hi = b * args.block, min((b + 1) * args.block, args.n_samples)
         t0 = time.time()
-        results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(
-            delayed(fn)(
-                theta_np[i], args.seed + i + 1,
-                args.start_age, args.n_waves, args.wave_years, args.grid,
+        if args.device == "cuda":
+            xb, ab = generate_block_gpu(
+                theta_np[lo:hi], args.seed + lo + 1, args.start_age,
+                args.n_waves, args.wave_years, args.grid, args.theta_batch,
             )
-            for i in range(lo, hi)
-        )
+        else:
+            results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(
+                delayed(fn)(
+                    theta_np[i], args.seed + i + 1,
+                    args.start_age, args.n_waves, args.wave_years, args.grid,
+                )
+                for i in range(lo, hi)
+            )
+            xb = np.stack([r[0] for r in results])
+            ab = np.stack([r[1] for r in results])
         # Write to a temp name then rename, so an interrupted write cannot leave
         # a half-formed shard that a resume would trust. The temp name must
         # already end in .npz (np.savez appends the suffix otherwise, which
         # breaks the rename) and must not match the shard_*.npz glob.
         tmp = shard_dir / f".tmp_shard_{b:05d}.npz"
-        np.savez(
-            tmp,
-            x=np.stack([r[0] for r in results]),
-            alive=np.stack([r[1] for r in results]),
-            lo=lo, hi=hi,
-        )
+        np.savez(tmp, x=xb, alive=ab, lo=lo, hi=hi)
         tmp.rename(sf)
 
         completed_now += 1

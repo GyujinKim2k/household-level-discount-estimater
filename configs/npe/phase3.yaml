@@ -2,7 +2,8 @@
 # Observation window unchanged from Phases 1-2: biennial, matching PSID.
 name: phase3
 simulator: twoasset   # scripts/generate_dataset.py --simulator
-grid: mid            # 107x56, 0.94 se discretization error (validated)
+grid: full           # Laibson et al.'s exact 190x84 - no coarsening,
+                     # affordable on GPU (~4.8 s/solve vs ~1678 s on CPU)
 
 # β is UNLOCKED in Phase 3 (was locked at 1.0 in Phases 1-2).
 # Naive quasi-hyperbolic, matching Laibson et al.'s benchmark (naif=1, betahat=1).
@@ -15,7 +16,9 @@ prior:
 
 # Dataset generation (see scripts/generate_dataset.py)
 dataset:
-  n_samples: 8192          # Sobol draws; power of 2.
+  n_samples: 65536         # Sobol draws; power of 2. 8x Phase 2 for a
+                           # 3-parameter problem. Power-of-2 prefixes are
+                           # themselves balanced, so partial runs are usable.
   start_age: 30            # first wave covers ages 30-31.
   n_waves: 5               # ages 30-39, two years per wave.
   wave_years: 2            # biennial — PSID post-1997 schedule.
