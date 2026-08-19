@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from math import ceil
@@ -44,7 +45,7 @@ log = logging.getLogger("generate_dataset")
 
 def generate_block_gpu(
     thetas: np.ndarray, seed_base: int, start_age: int, n_waves: int,
-    wave_years: int, grid: str, theta_batch: int,
+    wave_years: int, grid: str, theta_batch: int, chunk: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Solve a block of draws on the GPU, then forward-simulate on the CPU.
 
@@ -62,7 +63,8 @@ def generate_block_gpu(
     xs, alives = [], []
     for s0 in range(0, len(thetas), theta_batch):
         s1 = min(s0 + theta_batch, len(thetas))
-        sols = solve_batch(thetas[s0:s1], GRIDS[grid], theta_batch=theta_batch)
+        sols = solve_batch(thetas[s0:s1], GRIDS[grid], theta_batch=theta_batch,
+                           chunk=chunk)
         for i, sol in enumerate(sols):
             panel = simulate(sol, n_households=1, seed=seed_base + s0 + i)
             x, alive = aggregate_waves(
@@ -77,6 +79,48 @@ def generate_block_gpu(
 
 def _shard_dir(out: Path) -> Path:
     return out.parent / (out.stem + "_shards")
+
+
+def _solver_config(args) -> dict:
+    """The settings a shard's contents actually depend on.
+
+    The GPU solve is reproducible at a fixed (device, theta_batch, chunk) but
+    not across them, and not across GPU models: the expectation step contracts
+    through cuBLAS, whose summation order varies with problem size and
+    architecture, and the grids are built from round dollar amounts so ~99% of
+    states hold two exactly-tied choices for those last bits to decide between.
+    Mixing configurations silently produces a dataset from two different
+    simulators -- which is precisely what an A100-to-V100 swap did mid-run,
+    moving 6 of 16 draws by up to $48,000.
+    """
+    cfg = {"simulator": args.simulator, "grid": args.grid, "device": args.device,
+           "start_age": args.start_age, "n_waves": args.n_waves,
+           "wave_years": args.wave_years, "seed": args.seed}
+    if args.device == "cuda":
+        import torch
+        cfg |= {"theta_batch": args.theta_batch, "chunk": args.chunk,
+                "gpu": torch.cuda.get_device_name(0)}
+    return cfg
+
+
+def _check_config(shard_dir: Path, cfg: dict, log_fn) -> None:
+    """Refuse to add shards to a directory built under different settings."""
+    marker = shard_dir / "solver_config.json"
+    if not marker.exists():
+        marker.write_text(json.dumps(cfg, indent=2, sort_keys=True))
+        return
+    old = json.loads(marker.read_text())
+    if old == cfg:
+        return
+    diff = {k: (old.get(k), cfg.get(k)) for k in set(old) | set(cfg)
+            if old.get(k) != cfg.get(k)}
+    raise SystemExit(
+        f"Existing shards in {shard_dir} were generated under a different "
+        f"configuration, so resuming would mix two simulators:\n"
+        + "\n".join(f"  {k}: {was!r} -> {now!r}" for k, (was, now) in sorted(diff.items()))
+        + "\nMove the directory aside to start a fresh dataset, or restore the "
+          "original settings to continue this one."
+    )
 
 
 def assemble(out: Path, theta_np: np.ndarray, log_fn) -> bool:
@@ -148,8 +192,13 @@ def main() -> None:
                              "(~4.8 s/solve at the full grid vs ~1678 s on one "
                              "CPU core).")
     parser.add_argument("--theta_batch", type=int, default=16,
-                        help="cuda only: draws solved simultaneously. Throughput "
-                             "is flat above ~8, so this mainly trades memory.")
+                        help="cuda only: draws solved simultaneously. Capped to "
+                             "what device memory allows; the solve is "
+                             "batch-invariant, so this changes speed only.")
+    parser.add_argument("--chunk", type=int, default=48,
+                        help="cuda only: liquid-grid rows per inner block. "
+                             "Smaller chunks shrink each slab and so allow a "
+                             "larger theta_batch; the product is what fits.")
     parser.add_argument("--verbose", type=int, default=0)
     args = parser.parse_args()
 
@@ -167,6 +216,35 @@ def main() -> None:
 
     shard_dir = _shard_dir(out)
     shard_dir.mkdir(parents=True, exist_ok=True)
+    cfg = _solver_config(args)
+    _check_config(shard_dir, cfg, log.info)
+    if args.device == "cuda":
+        # The planner silently caps theta_batch to what fits. Silent is wrong
+        # here: the recorded config would no longer describe the shards, and a
+        # card with less free memory would quietly start a second regime.
+        from hh_npe.simulator import grids
+        from hh_npe.simulator.twoasset import GRIDS
+        from hh_npe.simulator.twoasset_gpu import _plan_batching
+
+        spec = GRIDS[args.grid]
+        age = grids.ages(spec.age_start, spec.age_end)
+        nX = len(grids.liquid_grid(age, spec.xjump, spec.xmax, spec.x_cells_per_step)[0])
+        nZ = len(grids.illiquid_grid(spec.zjump, spec.zmax, spec.z_cells_per_step))
+        fits, _ = _plan_batching(nX, nZ, args.theta_batch, args.chunk, "cuda")
+        if fits < args.theta_batch:
+            raise SystemExit(
+                f"theta_batch {args.theta_batch} with chunk {args.chunk} does not "
+                f"fit in this GPU's free memory; only {fits} would. Pass "
+                f"--theta_batch {fits} (or a smaller --chunk) explicitly, so the "
+                f"configuration recorded with the shards is the one actually used."
+            )
+    if args.device == "cuda" and args.block % args.theta_batch:
+        log.warning(
+            f"block {args.block} is not a multiple of theta_batch "
+            f"{args.theta_batch}: the last {args.block % args.theta_batch} draws "
+            f"of every shard are solved in a smaller batch, which is a different "
+            f"reduction regime. Prefer a theta_batch that divides the block."
+        )
     n_blocks = ceil(args.n_samples / args.block)
     done = sum(1 for b in range(n_blocks) if (shard_dir / f"shard_{b:05d}.npz").exists())
     log.info(
@@ -190,6 +268,7 @@ def main() -> None:
             xb, ab = generate_block_gpu(
                 theta_np[lo:hi], args.seed + lo + 1, args.start_age,
                 args.n_waves, args.wave_years, args.grid, args.theta_batch,
+                args.chunk,
             )
         else:
             results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(

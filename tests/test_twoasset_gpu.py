@@ -67,17 +67,59 @@ def test_simulated_panels_identical(gpu_solutions):
             np.testing.assert_array_equal(pc[key], pg[key], err_msg=f"{key} @ {th}")
 
 
-def test_batching_does_not_change_results():
-    """Splitting a batch must not alter any draw's solution."""
+def test_batching_may_change_tied_choices_but_not_value():
+    """Changing ``theta_batch`` may pick a different *equally optimal* policy.
+
+    This documents a real limitation rather than asserting one away. The
+    expectation step contracts through cuBLAS, which chooses its summation order
+    from the problem size, so ``theta_batch`` perturbs EV in the last bits.
+    Where two portfolios leave exactly equal cash -- 98.8% of states hold such a
+    pair -- that flips which one wins. Making it invariant costs ~6x runtime
+    (see the note in ``solve_batch``), so instead a dataset is generated under
+    one fixed configuration and ``generate_dataset`` enforces that on resume.
+
+    The tie is in the *value*, not in consumption -- two portfolios with quite
+    different consumption can carry equal utility-plus-continuation -- so the
+    guard is that such states stay vanishingly rare. If a change makes batching
+    disagree broadly, that is a bug, not tie-breaking.
+    """
     from hh_npe.simulator.twoasset_gpu import solve_batch
 
     thetas = np.array([BENCHMARK, [0.6, 0.95, 2.5], [0.9, 0.97, 1.2]])
     one = solve_batch(thetas, TINY, theta_batch=3)
     split = solve_batch(thetas, TINY, theta_batch=1)
     for a, b in zip(one, split):
-        np.testing.assert_array_equal(a.next_x, b.next_x)
-        np.testing.assert_array_equal(a.next_z, b.next_z)
-        np.testing.assert_array_equal(a.cons, b.cons)
+        ok = a.solvable & b.solvable
+        differing = (a.cons[ok] != b.cons[ok]).mean()
+        assert differing < 1e-4, f"{differing:.2%} of states disagree, not tie noise"
+
+
+def test_repeated_solve_is_bit_identical():
+    """The same draws, twice, must give the same policy.
+
+    They did not before ``_first_argmax``: the grids are built from round dollar
+    amounts, so 98.8% of states hold two ``(X', Z')`` choices leaving bitwise
+    equal cash, and an unpinned max reduction picked between them by scheduling
+    order. On a V100 that moved one draw in sixteen by $20,000.
+    """
+    from hh_npe.simulator.twoasset_gpu import solve_batch
+
+    thetas = np.array([BENCHMARK, [0.6, 0.95, 2.5]])
+    a = solve_batch(thetas, TINY, theta_batch=2)
+    b = solve_batch(thetas, TINY, theta_batch=2)
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(x.next_x, y.next_x)
+        np.testing.assert_array_equal(x.next_z, y.next_z)
+        np.testing.assert_array_equal(x.cons, y.cons)
+
+
+def test_first_argmax_breaks_ties_toward_lowest_index():
+    """Tie rule must match ``np.argmax``, which the CPU reference relies on."""
+    from hh_npe.simulator.twoasset_gpu import _first_argmax
+
+    payoff = torch.tensor([[1.0, 3.0, 3.0, 2.0, 3.0]], dtype=torch.float64, device="cuda")
+    ar = torch.arange(payoff.shape[-1], dtype=torch.int32, device="cuda")
+    assert _first_argmax(payoff, ar).item() == 1 == int(np.argmax(payoff.cpu().numpy()))
 
 
 def test_solution_is_float64():

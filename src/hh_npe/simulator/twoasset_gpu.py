@@ -30,6 +30,10 @@ from hh_npe.simulator.twoasset import NEG, ModelSpec, Solution
 
 DEFAULT_DEVICE = "cuda"
 
+#: Larger than any choice index, so untied entries never win the ``amin`` in
+#: :func:`_first_argmax`. int32 keeps the temporary at half a float64 slab.
+_IDX_SENTINEL = 2**31 - 1
+
 
 def _nearest_index_np(grid: np.ndarray, values: np.ndarray) -> np.ndarray:
     """Ties round up, matching MATLAB's ``griddedInterpolant(..., 'nearest')``.
@@ -42,17 +46,42 @@ def _nearest_index_np(grid: np.ndarray, values: np.ndarray) -> np.ndarray:
     return np.where(values - left < right - values, idx - 1, idx)
 
 
+def _first_argmax(payoff: "torch.Tensor", ar: "torch.Tensor") -> "torch.Tensor":
+    """Index of the maximum along the last axis, **ties resolved to the lowest
+    index** -- the rule ``np.argmax`` follows, and therefore the CPU solver's.
+
+    ``torch.argmax`` leaves the choice among tied entries to the reduction
+    order, which varies with tensor shape, batch size and GPU architecture. That
+    is not a theoretical concern here: the liquid and illiquid grids are both
+    built from round dollar amounts, so 98.8% of states have at least one pair
+    of ``(X', Z')`` choices leaving bitwise-identical cash on hand. Whenever
+    their continuation values tie as well, an unpinned reduction silently picks
+    a different -- equally optimal -- portfolio, and the two wealth paths then
+    diverge for the rest of the lifecycle. Measured across an A100 and a V100,
+    that moved 6 of 16 draws by up to $48,000 of illiquid assets.
+    """
+    amax = payoff.amax(dim=-1, keepdim=True)
+    # The int32 temporary is what keeps this to half a slab; only the reduced
+    # result is widened, and ``gather`` requires int64 indices.
+    return torch.where(payoff == amax, ar, _IDX_SENTINEL).amin(dim=-1).long()
+
+
 def _plan_batching(nX: int, nZ: int, theta_batch: int, chunk: int,
                    device: str) -> tuple[int, int]:
     """Pick ``(theta_batch, chunk)`` that fit comfortably in device memory.
 
-    Peak live tensors per chunk are one shared ``log C`` plus one ``u`` per
-    theta in the batch, each ``chunk * nZ * nX * nZ`` float64 elements.
+    Peak live tensors per chunk are ``C`` and ``log C``, shared across the
+    batch, plus ``u`` and ``payoff`` for every theta in it -- and, inside
+    :func:`_first_argmax`, a bool mask (1/8 slab) and an int32 index temporary
+    (1/2 slab) per theta. That is ``2.625 * B + 2`` slabs of
+    ``chunk * nZ * nX * nZ`` float64 elements. Counting only ``B + 2``
+    overestimates what fits by more than a factor of two, which an 80 GB card
+    absorbs silently and a 16 GB one turns into an OOM mid-run.
     """
     free, _total = torch.cuda.mem_get_info(torch.device(device))
     budget = free * 0.70  # leave headroom for workspace and fragmentation
     per_slab = chunk * nZ * nX * nZ * 8
-    max_b = max(1, int(budget / per_slab) - 2)
+    max_b = max(1, int((int(budget / per_slab) - 2) / 2.625))
     if theta_batch > max_b:
         theta_batch = max_b
     return theta_batch, chunk
@@ -124,6 +153,9 @@ def solve_batch(
                 torch.as_tensor(idx, dtype=torch.long, device=dev),
             ))
         shift_plan.append(per_state)
+
+    # Choice index for the tie-break in _first_argmax; broadcasts over (B, ., ., K).
+    ar_choice = torch.arange(nX * nZ, dtype=torch.int32, device=dev)
 
     theta_batch, chunk = _plan_batching(nX, nZ, theta_batch, chunk, device)
     n_total = thetas.shape[0]
@@ -199,7 +231,7 @@ def solve_batch(
 
                     evs = ev_c[:, :, s].view(B, 1, 1, nX * nZ)
                     payoff = u_flat + bd * evs
-                    best = payoff.argmax(dim=-1)
+                    best = _first_argmax(payoff, ar_choice)
                     ok = payoff.gather(-1, best[..., None]).squeeze(-1) > NEG / 2
                     jx, jz = best // nZ, best % nZ
 
@@ -216,7 +248,7 @@ def solve_batch(
                     if naive.any():
                         # payoff_hat = payoff + (betahat - beta) * delta * EV
                         payoff.add_((bhat_d - bd) * evs)
-                        best_h = payoff.argmax(dim=-1)
+                        best_h = _first_argmax(payoff, ar_choice)
                         max_h = payoff.gather(-1, best_h[..., None]).squeeze(-1)
                         ev_at = ev_true.expand(B, hi - lo, nZ, -1).gather(
                             -1, best_h[..., None]).squeeze(-1)
@@ -243,6 +275,20 @@ def solve_batch(
 
             if t > 0:
                 V[:, ~feasible[t], :, :] = NEG
+                # These contractions are NOT batch-invariant, and cannot cheaply
+                # be made so: cuBLAS picks its summation order from the problem
+                # size, so changing theta_batch perturbs EV in the last bits and
+                # flips the choice wherever two portfolios leave exactly equal
+                # cash (see _first_argmax). Folding B into the row dimension of
+                # a plain matmul does not fix it -- the row count varies with B
+                # too. An explicit Python accumulation is invariant but runs
+                # 18,447 iterations per solve, ~6x slower overall.
+                #
+                # So the guarantee this solver offers is reproducibility at a
+                # *fixed* (device, theta_batch, chunk), not across them. A
+                # dataset must therefore be generated under one configuration;
+                # generate_dataset records it per shard and refuses to resume
+                # under a different one.
                 V_shift = torch.empty((B, nS, nX, nZ), dtype=f64, device=dev)
                 for s2 in range(nS):
                     probs, idx = shift_plan[t][s2]
