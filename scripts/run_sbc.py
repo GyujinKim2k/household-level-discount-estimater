@@ -24,7 +24,8 @@ from omegaconf import DictConfig
 from hh_npe.evaluation.sbc import compute_ranks, coverage_at_level, plot_sbc_ranks
 from hh_npe.npe.prior import make_sbi_prior
 from hh_npe.npe.train import load_posterior
-from hh_npe.simulator.dispatch import SIMULATORS
+from hh_npe.data.dataset import read_solver_config
+from hh_npe.simulator.dispatch import SIMULATORS, simulate_batch_twoasset_gpu
 from hh_npe.utils.seeding import seed_all
 
 
@@ -37,8 +38,31 @@ def simulate_for_sbc(
     simulator: str = "twoasset",
     grid: str = "coarse",
     n_jobs: int = -1,
+    solver_config: dict | None = None,
 ) -> torch.Tensor:
-    """Simulate SBC draws through the *same* simulator that made the training set."""
+    """Simulate SBC draws through the *same* simulator that made the training set.
+
+    "Same" has to be taken literally for the two-asset model. Its grids are built
+    from round dollar amounts, so ~99% of states hold two ``(X', Z')`` choices
+    leaving bitwise-identical cash; where their continuation values tie too, CPU
+    and GPU pick different -- equally optimal -- portfolios. Both reproduce
+    Laibson et al.'s table 3 (fidelity 0.0102 vs 0.0104), but they are not the
+    same simulator: across six draws the choice moved mean liquid assets by 25%.
+    Running SBC on the CPU against a GPU-generated training set would therefore
+    show miscalibration that belongs to the mismatch, not to the posterior.
+
+    So when the training set records a CUDA configuration, reproduce it exactly
+    -- device, theta_batch and chunk -- rather than defaulting to the CPU path.
+    """
+    if solver_config and solver_config.get("device") == "cuda":
+        x, _alive = simulate_batch_twoasset_gpu(
+            thetas.numpy(), seed_base, start_age, n_waves, wave_years,
+            grid=solver_config.get("grid", grid),
+            theta_batch=solver_config["theta_batch"],
+            chunk=solver_config["chunk"],
+        )
+        return torch.from_numpy(x).float()
+
     fn = SIMULATORS[simulator]
     n = thetas.shape[0]
     out = Parallel(n_jobs=n_jobs)(
@@ -69,6 +93,16 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Sampling {cfg.eval.n_simulations} thetas from prior...")
     thetas = prior.sample((cfg.eval.n_simulations,))
 
+    solver_config = read_solver_config(cfg.npe.dataset.path)
+    if solver_config:
+        log.info(f"Training set solver config: {solver_config}")
+    else:
+        log.warning(
+            "No solver_config.json beside the training set, so SBC cannot verify "
+            "it is using the same simulator. For a CUDA-generated two-asset "
+            "dataset the CPU path is NOT equivalent -- see simulate_for_sbc."
+        )
+
     log.info("Simulating xs for SBC (full lifecycle solve per theta)...")
     xs = simulate_for_sbc(
         thetas,
@@ -78,6 +112,7 @@ def main(cfg: DictConfig) -> None:
         seed_base=cfg.seed + 2000,
         simulator=cfg.npe.get("simulator", "twoasset"),
         grid=cfg.npe.get("grid", "coarse"),
+        solver_config=solver_config,
     )
 
     log.info(f"Computing ranks with {cfg.eval.n_posterior_samples} posterior samples per point...")

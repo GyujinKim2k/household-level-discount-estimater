@@ -7,9 +7,28 @@ helpers. Keep the on-disk format trivial and torch-native (``.pt``).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import torch
+
+
+def shard_dir(dataset_path: str | Path) -> Path:
+    """Where a dataset's checkpoint shards live, given its ``.pt`` path."""
+    p = Path(dataset_path)
+    return p.parent / (p.stem + "_shards")
+
+
+def read_solver_config(dataset_path: str | Path) -> dict | None:
+    """The solver settings a dataset's shards were generated under, if recorded.
+
+    The GPU solve is reproducible at a fixed ``(device, theta_batch, chunk)``
+    and not across them, so SBC has to reproduce the training set's settings
+    exactly rather than pick its own. Returns ``None`` for datasets built before
+    the configuration was recorded, or on the CPU path where it does not apply.
+    """
+    marker = shard_dir(dataset_path) / "solver_config.json"
+    return json.loads(marker.read_text()) if marker.exists() else None
 
 
 def save_dataset(theta: torch.Tensor, x: torch.Tensor, path: str | Path) -> None:
