@@ -57,6 +57,17 @@ def main(cfg: DictConfig) -> None:
     theta, x = load_dataset(npe_cfg.dataset.path)
     log.info(f"Loaded dataset: theta={tuple(theta.shape)}, x={tuple(x.shape)}")
 
+    # Per-feature statistics over the whole training set, so the embedder's
+    # normalization is fixed by the data rather than recomputed per wave. See
+    # the embedder module docstring for why Phase 3's feature scales need this.
+    stats = {}
+    if npe_cfg.embedder.get("standardize", False):
+        stats = {"feature_mean": x.mean(dim=(0, 1)), "feature_std": x.std(dim=(0, 1))}
+        log.info(
+            "Standardizing features: mean=%s std=%s",
+            stats["feature_mean"].tolist(), stats["feature_std"].tolist(),
+        )
+
     embedder = TrajectoryTransformer(
         n_features=x.shape[-1],
         seq_len=npe_cfg.dataset.n_waves,
@@ -64,6 +75,7 @@ def main(cfg: DictConfig) -> None:
         n_heads=npe_cfg.embedder.n_heads,
         n_layers=npe_cfg.embedder.n_layers,
         output_dim=npe_cfg.embedder.output_dim,
+        **stats,
     )
 
     box = build_prior_box(cfg)

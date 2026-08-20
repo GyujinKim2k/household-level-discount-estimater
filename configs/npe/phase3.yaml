@@ -33,6 +33,13 @@ embedder:
   n_layers: 2
   pool: mean              # alt: cls
   output_dim: 32
+  standardize: true       # true = fixed per-feature stats over the dataset;
+                          # false = LayerNorm across features within each wave.
+                          # Measured on 8192 draws, scored on 512 held-out:
+                          # beta contraction 0.234 -> 0.411, corr 0.411 -> 0.610;
+                          # held-out log q 1.652 -> 2.835. LayerNorm's per-wave
+                          # mean and spread are set by income and illiquid_assets,
+                          # which discards the credit-card signal beta rides on.
 
 # Training (sbi SNPE-C)
 training:
