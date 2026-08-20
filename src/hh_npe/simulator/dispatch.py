@@ -40,9 +40,14 @@ def simulate_one_hark(
 
 def simulate_one_twoasset(
     theta: np.ndarray, sim_seed: int, start_age: int, n_waves: int,
-    wave_years: int, grid: str = "mid",
-) -> tuple[np.ndarray, np.ndarray]:
-    """Phase 3 path: credit cards, illiquid asset, naive quasi-hyperbolic beta."""
+    wave_years: int, grid: str = "mid", return_panel: bool = False,
+) -> tuple[np.ndarray, ...]:
+    """Phase 3 path: credit cards, illiquid asset, naive quasi-hyperbolic beta.
+
+    ``return_panel`` additionally returns the annual panel the waves were
+    aggregated from. See :func:`simulate_batch_twoasset_gpu` for why keeping it
+    is worth the bytes.
+    """
     from hh_npe.simulator.twoasset import GRIDS, simulate, solve
 
     beta, delta, crra = (float(v) for v in theta)
@@ -55,14 +60,24 @@ def simulate_one_twoasset(
         panel, age_start_sim=AGE_START_SIM, start_age=start_age,
         n_waves=n_waves, wave_years=wave_years, features=FEATURES_TWOASSET,
     )
+    if return_panel:
+        return x[0], alive[0], panel
     return x[0], alive[0]
 
 
 def simulate_batch_twoasset_gpu(
     thetas: np.ndarray, seed_base: int, start_age: int, n_waves: int,
     wave_years: int, grid: str = "full", theta_batch: int = 16, chunk: int = 16,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_panels: bool = False,
+) -> tuple[np.ndarray, ...]:
     """Phase 3 on the GPU: many draws per backward induction, one panel each.
+
+    ``return_panels`` additionally returns the annual panels, stacked over
+    draws, as a dict of ``(n_draws, T)`` arrays. Worth storing: the observation
+    window (``start_age``, ``n_waves``, ``wave_years``) and the feature set are
+    aggregation choices applied *after* the solve, which is ~99% of the cost.
+    Keeping the panel makes any of them re-derivable without re-solving; keeping
+    only ``x`` means a window change costs the whole run again.
 
     Lives here, beside the single-draw CPU paths, for the reason in the module
     docstring: SBC is only meaningful when its simulator is the one that made
@@ -83,7 +98,8 @@ def simulate_batch_twoasset_gpu(
 
     # Consume each sub-batch before solving the next: a Solution holds ~58 MB of
     # policy arrays, so accumulating a whole large block would exhaust host RAM.
-    xs, alives = [], []
+    # The panels are far smaller -- ~4 KB per draw -- so holding those is fine.
+    xs, alives, panels = [], [], []
     for s0 in range(0, len(thetas), theta_batch):
         s1 = min(s0 + theta_batch, len(thetas))
         sols = solve_batch(thetas[s0:s1], GRIDS[grid],
@@ -96,7 +112,12 @@ def simulate_batch_twoasset_gpu(
             )
             xs.append(x[0])
             alives.append(alive[0])
+            if return_panels:
+                panels.append(panel)
         del sols
+    if return_panels:
+        merged = {k: np.concatenate([p[k] for p in panels]) for k in panels[0]}
+        return np.stack(xs), np.stack(alives), merged
     return np.stack(xs), np.stack(alives)
 
 

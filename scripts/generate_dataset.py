@@ -36,11 +36,32 @@ import torch
 from joblib import Parallel, delayed
 
 from hh_npe.data.dataset import save_dataset, shard_dir as _shard_dir
+from hh_npe.data.waves import FEATURES_TWOASSET, aggregate_waves
 from hh_npe.npe.prior import PHASE3, PriorBox, sample_sobol
-from hh_npe.simulator.dispatch import SIMULATORS, simulate_batch_twoasset_gpu
+from hh_npe.simulator.dispatch import (
+    AGE_START_SIM, SIMULATORS, simulate_batch_twoasset_gpu,
+)
 from hh_npe.utils.seeding import seed_all
 
 log = logging.getLogger("generate_dataset")
+
+#: Prefix for the annual panel arrays inside a shard's ``.npz``.
+PANEL_PREFIX = "panel_"
+
+
+def _panel_of(shard) -> dict[str, np.ndarray]:
+    """The annual panel stored in a shard, or ``{}`` for older shards."""
+    return {k[len(PANEL_PREFIX):]: shard[k] for k in shard.files
+            if k.startswith(PANEL_PREFIX)}
+
+
+def _stores_panel(args) -> bool:
+    """Whether shards keep the annual panel alongside the aggregated waves.
+
+    Only the two-asset path: the HARK simulator is Phases 1-2, already
+    reproducible, and not worth changing its shard format for.
+    """
+    return args.simulator == "twoasset" and not args.no_panel
 
 
 def _solver_config(args) -> dict:
@@ -57,7 +78,8 @@ def _solver_config(args) -> dict:
     """
     cfg = {"simulator": args.simulator, "grid": args.grid, "device": args.device,
            "start_age": args.start_age, "n_waves": args.n_waves,
-           "wave_years": args.wave_years, "seed": args.seed}
+           "wave_years": args.wave_years, "seed": args.seed,
+           "store_panel": _stores_panel(args)}
     if args.device == "cuda":
         import torch
         cfg |= {"theta_batch": args.theta_batch, "chunk": args.chunk,
@@ -85,26 +107,54 @@ def _check_config(shard_dir: Path, cfg: dict, log_fn) -> None:
     )
 
 
-def assemble(out: Path, theta_np: np.ndarray, log_fn) -> bool:
+def assemble(out: Path, theta_np: np.ndarray, log_fn, window: dict | None = None) -> bool:
     """Build the ``.pt`` dataset from whatever contiguous shards exist.
 
     Only a contiguous prefix starting at shard 0 is used. That is deliberate:
     scrambled Sobol keeps its low-discrepancy balance on power-of-2 *prefixes*,
     so a prefix is a valid smaller dataset while an arbitrary subset is not.
+
+    When the shards carry the annual panel, ``window`` re-aggregates them to any
+    observation window -- a different ``n_waves``, ``start_age`` or
+    ``wave_years`` -- without re-solving. Passing the window the shards were
+    generated under reproduces the stored ``x`` exactly.
     """
     shards = sorted(_shard_dir(out).glob("shard_*.npz"))
     if not shards:
         log_fn("No shards found.")
         return False
 
-    xs, alives, expected = [], [], 0
+    xs, alives, expected, rewindowed = [], [], 0, 0
     for sf in shards:
         d = np.load(sf)
         if int(d["lo"]) != expected:  # gap - stop at the contiguous prefix
             break
-        xs.append(d["x"])
-        alives.append(d["alive"])
+        panel = _panel_of(d)
+        if panel and window:
+            xi, ai = aggregate_waves(
+                panel, age_start_sim=AGE_START_SIM, features=FEATURES_TWOASSET,
+                **window,
+            )
+            rewindowed += 1
+        else:
+            xi, ai = d["x"], d["alive"]
+            if window and xi.shape[1] != window["n_waves"]:
+                raise SystemExit(
+                    f"{sf.name} holds {xi.shape[1]} waves and no annual panel, so "
+                    f"it cannot be re-aggregated to {window['n_waves']}. Only a run "
+                    f"generated with the panel supports changing the window; "
+                    f"otherwise the solve has to be redone."
+                )
+        xs.append(xi)
+        alives.append(ai)
         expected = int(d["hi"])
+
+    if rewindowed:
+        log_fn(
+            f"Re-aggregated {rewindowed} shards from the stored annual panel to "
+            f"{window['n_waves']} waves of {window['wave_years']}y from age "
+            f"{window['start_age']}."
+        )
 
     x_np = np.concatenate(xs)
     alive_np = np.concatenate(alives)
@@ -161,6 +211,13 @@ def main() -> None:
                         help="cuda only: liquid-grid rows per inner block. "
                              "Smaller chunks shrink each slab and so allow a "
                              "larger theta_batch; the product is what fits.")
+    parser.add_argument("--no_panel", action="store_true",
+                        help="Do not store the annual panel in each shard. The "
+                             "panel costs ~1 MB per 256 draws and no measurable "
+                             "time -- the solve is ~99% of the cost -- and it is "
+                             "what makes the observation window changeable "
+                             "afterwards. Without it, a different --n_waves "
+                             "means generating the whole dataset again.")
     parser.add_argument("--verbose", type=int, default=0)
     args = parser.parse_args()
 
@@ -170,10 +227,13 @@ def main() -> None:
     box = PHASE3 if args.simulator == "twoasset" else PriorBox()
     out = args.out or Path(f"data/processed/{args.simulator}_dataset.pt")
     fn = SIMULATORS[args.simulator]
+    store_panel = _stores_panel(args)
     theta_np = sample_sobol(args.n_samples, box, seed=args.seed)
+    window = {"start_age": args.start_age, "n_waves": args.n_waves,
+              "wave_years": args.wave_years}
 
     if args.assemble_only:
-        assemble(out, theta_np, log.info)
+        assemble(out, theta_np, log.info, window)
         return
 
     shard_dir = _shard_dir(out)
@@ -211,7 +271,8 @@ def main() -> None:
     done = sum(1 for b in range(n_blocks) if (shard_dir / f"shard_{b:05d}.npz").exists())
     log.info(
         f"simulator={args.simulator} grid={args.grid} params={box.names} "
-        f"waves={args.n_waves}x{args.wave_years}y from age {args.start_age}"
+        f"waves={args.n_waves}x{args.wave_years}y from age {args.start_age} "
+        f"panel={'stored' if store_panel else 'discarded'}"
     )
     log.info(
         f"{args.n_samples} draws in {n_blocks} shards of {args.block}; "
@@ -226,28 +287,38 @@ def main() -> None:
             continue
         lo, hi = b * args.block, min((b + 1) * args.block, args.n_samples)
         t0 = time.time()
+        panels: dict[str, np.ndarray] = {}
         if args.device == "cuda":
-            xb, ab = simulate_batch_twoasset_gpu(
+            out_batch = simulate_batch_twoasset_gpu(
                 theta_np[lo:hi], args.seed + lo + 1, args.start_age,
                 args.n_waves, args.wave_years, args.grid, args.theta_batch,
-                args.chunk,
+                args.chunk, store_panel,
             )
+            xb, ab = out_batch[0], out_batch[1]
+            if store_panel:
+                panels = out_batch[2]
         else:
+            kw = {"return_panel": True} if store_panel else {}
             results = Parallel(n_jobs=args.n_jobs, verbose=args.verbose)(
                 delayed(fn)(
                     theta_np[i], args.seed + i + 1,
                     args.start_age, args.n_waves, args.wave_years, args.grid,
+                    **kw,
                 )
                 for i in range(lo, hi)
             )
             xb = np.stack([r[0] for r in results])
             ab = np.stack([r[1] for r in results])
+            if store_panel:
+                panels = {k: np.concatenate([r[2][k] for r in results])
+                          for k in results[0][2]}
         # Write to a temp name then rename, so an interrupted write cannot leave
         # a half-formed shard that a resume would trust. The temp name must
         # already end in .npz (np.savez appends the suffix otherwise, which
         # breaks the rename) and must not match the shard_*.npz glob.
         tmp = shard_dir / f".tmp_shard_{b:05d}.npz"
-        np.savez(tmp, x=xb, alive=ab, lo=lo, hi=hi)
+        np.savez(tmp, x=xb, alive=ab, lo=lo, hi=hi,
+                 **{PANEL_PREFIX + k: v for k, v in panels.items()})
         tmp.rename(sf)
 
         completed_now += 1
@@ -261,7 +332,7 @@ def main() -> None:
         )
 
     log.info(f"All shards complete in {(time.time() - t_start) / 3600:.2f} h")
-    assemble(out, theta_np, log.info)
+    assemble(out, theta_np, log.info, window)
 
 
 if __name__ == "__main__":
