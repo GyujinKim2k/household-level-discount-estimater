@@ -33,6 +33,15 @@ FEATURES_MVP: tuple[str, ...] = ("income", "consumption", "liquid_assets")
 #: signal that present bias rides on.
 FEATURES_TWOASSET: tuple[str, ...] = FEATURES_MVP + ("illiquid_assets",)
 
+#: Phase 3 with the household's age attached to each wave. Needed once the
+#: observation window stops being fixed at ages 30-39: consumption and asset
+#: levels are strongly age-dependent, so a model shown a window without knowing
+#: *when* it is looking has to marginalize over age rather than condition on
+#: it. PSID always records the head's age, so conditioning is the honest
+#: choice. ``age`` is not a flow, so it is read at the end of each wave like
+#: any other stock.
+FEATURES_TWOASSET_AGE: tuple[str, ...] = FEATURES_TWOASSET + ("age",)
+
 #: Default remains the MVP set so Phase 1-2 behaviour is unchanged.
 FEATURES = FEATURES_MVP
 

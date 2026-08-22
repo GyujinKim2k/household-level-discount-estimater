@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Run the full-dataset window comparison once generation releases the GPU.
+# Run the full-dataset wave-count comparison once generation releases the GPU.
+#
+# The wave count (5 / 10 / 15) is the one observation-model choice still open:
+# configs/npe/phase3.yaml carries n_waves 10 provisionally, decided on the
+# 8192-draw prefix under the old fixed-window design. This settles it on all
+# 65536 draws under the random-age pipeline, on calibration as well as fit.
 #
 # Replaces the earlier queue_sbc.sh, which ran plain SBC against the 8192-draw
 # posterior. That posterior has seq_len 5 and the analysis window is now 10
@@ -39,13 +44,12 @@ if ! grep -q "All shards complete" "$GEN_LOG"; then
     exit 1
 fi
 
-# Re-derive the analysis window from the stored panels before anything reads
-# the .pt: generation writes it at its own --n_waves 5, which is not the
-# analysis window. Costs seconds and no GPU.
-echo "$(date -u '+%F %T') re-assembling at 10 waves from the stored panels"
-.venv/bin/python scripts/generate_dataset.py --assemble_only \
-    --simulator twoasset --grid full --n_samples 65536 --seed 0 \
-    --n_waves 10 --out data/processed/phase3_dataset.pt || exit 1
+# Build the canonical training set from the stored panels: random start ages,
+# 8 windows per panel, per-wave age channel. Generation writes a fixed 5-wave
+# `x` into each shard, which is not the analysis window. Costs seconds, no GPU.
+echo "$(date -u '+%F %T') building the random-age windowed dataset"
+.venv/bin/python scripts/build_windowed_dataset.py \
+    --out data/processed/phase3_windowed.pt || exit 1
 
 echo "$(date -u '+%F %T') generation complete; starting window comparison"
 exec .venv/bin/python scripts/compare_windows.py \

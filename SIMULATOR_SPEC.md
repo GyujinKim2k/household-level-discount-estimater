@@ -228,9 +228,61 @@ wave_years·(w+1))` where `t_start = start_age - age_start_sim`. A window
 extending past the simulator's final period raises `ValueError` rather than
 truncating.
 
-All phases pin `wave_years = 2` and `start_age = 30`. Phases 1–2 pin
-`n_waves = 5` → ages 30–39. **Phase 3 pins `n_waves = 10` → ages 30–49**
-(changed 2026-08-22, while this spec is still DRAFT and therefore unfrozen).
+All phases pin `wave_years = 2`. Phases 1–2 pin `start_age = 30` and
+`n_waves = 5` → ages 30–39.
+
+**Phase 3 draws the start age at random** from `U{25..40}` and cuts **8 windows
+per simulated panel** (changed 2026-08-22, while this spec is still DRAFT and
+therefore unfrozen). `n_waves = 10` is **provisional** — see §6.1.2.
+
+### 6.1.1 Why the window is random
+
+A fixed ages-30–49 window assumes every observed household is the same age.
+PSID contains households at whatever ages they happened to be during the survey
+years, and requiring a balanced ages-30–49 panel collapses the eligible birth
+cohorts — the constraint recorded below. Randomizing the window removes that
+requirement entirely: a household observed at 27–46 is now in-distribution.
+
+Measured on 8192 training panels with 2816 held out, held-out `log q`:
+
+| training windows | age channel | on random-age | on fixed-30 |
+|---|---|---|---|
+| fixed start 30, 1/panel | no | 1.649 | 3.657 |
+| random `U{25..40}`, 1/panel | yes | 3.572 | 3.499 |
+| random `U{25..40}`, 8/panel | yes | **4.219** | **4.182** |
+
+Randomization recovers 1.92 of the 2.0 nats the fixed model loses on realistic
+data, for 0.16 nats at its own design point. Augmentation adds ~0.65 more on
+both, and the augmented model beats the fixed specialist even on fixed-30 data.
+
+The household's age is supplied as a **per-wave age channel** (a fifth feature,
+`FEATURES_TWOASSET_AGE`), derived from `t_age`, which every shard already
+stores. PSID always records the head's age, so the posterior conditions on it
+rather than marginalizing over it.
+
+**A warning this comparison produced.** On random-age data the fixed model was
+*sharper* than the randomized one — `beta` contraction 0.539 against 0.445 —
+while being much less accurate (correlation with truth 0.492 against 0.650).
+Contraction alone would have selected the mis-specified model. Every
+contraction figure in this document is reported with an accuracy figure beside
+it for that reason, and `scripts/compare_windows.py` reports SBC calibration
+alongside both.
+
+**Effective sample size is the panel count, not the window count.** 8 windows
+from one panel are correlated draws from the joint
+`theta ~ prior, panel ~ p(.|theta), s ~ U{25..40}, x = window(panel, s)`. They
+are valid, and NPE stays consistent, but they carry no additional information
+about `theta` — they teach the age mapping. Training splits by panel
+(`hh_npe.npe.train._use_grouped_split`) because a row-wise split would validate
+on households the model trained on.
+
+### 6.1.2 Wave count — provisional
+
+`n_waves = 10` is a working choice, **not yet settled**. The figures below were
+measured on the 8192-draw prefix under the *old* fixed-window design. The wave
+count is being re-decided on all 65536 draws under the random-age pipeline
+(`scripts/compare_windows.py`, queued behind generation) before this spec is
+frozen.
 
 Measured on the 8192-draw Sobol prefix, scored on 2304 held-out draws, with
 draws, seed, architecture and training config identical across windows:
@@ -253,15 +305,20 @@ is one in which every household survives to 59. Real PSID households do not,
 and that mismatch grows with every wave past ~50, precisely where 15w earns
 its advantage.
 
-**Open empirical constraint (must be resolved before Phase 4).** Ten biennial
-waves exist in PSID calendar terms, but requiring a *balanced* ages-30–49
-panel collapses the eligible birth cohorts: within the README's PSID 2005–2013
-target only one cohort (age 30 in 2005) reaches 49 by 2023, and each extra
-required wave compounds attrition. The statistical gain above is therefore an
-upper bound on what the empirical sample can deliver, and the realised N has
-not been checked against a PSID extract — none exists in this tree. If N proves
-too small, the fallback is a shorter window (7–8 waves) or a variable
-`start_age` with the window's calendar position as a conditioning input.
+**Empirical constraint — largely dissolved by §6.1.1, not yet closed.** Ten
+biennial waves exist in PSID calendar terms, but requiring a *balanced
+ages-30–49* panel collapsed the eligible birth cohorts: within the README's
+PSID 2005–2013 target only one cohort (age 30 in 2005) reaches 49 by 2023.
+
+The random-age window removes that specific bind — households no longer need
+to be observed at one particular age range, so every cohort with 10 consecutive
+biennial observations qualifies, whatever age it happens to be. What remains is
+the requirement of 10 consecutive waves at all, which still compounds attrition
+relative to 5. That is exactly what §6.1.2's full-dataset comparison is meant to
+price, and the realised N still has not been checked against a PSID extract —
+none exists in this tree. If N proves too small, the fallback is a shorter
+window; the `windows` module supports any length the panel can hold, at no
+regeneration cost.
 
 `wave_years = 1` (annual) is implemented and tested but is **not** the
 pre-registered choice. It was considered for Phase 3 on the grounds that

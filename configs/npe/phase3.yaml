@@ -20,6 +20,10 @@ dataset:
                            # 3-parameter problem. Power-of-2 prefixes are
                            # themselves balanced, so partial runs are usable.
   start_age: 30            # first wave covers ages 30-31.
+  # PROVISIONAL pending the full-dataset comparison (scripts/compare_windows.py,
+  # queued behind generation). The figures below were measured on the 8192-draw
+  # prefix under the old fixed-window design; the wave count is being re-decided
+  # on all 65536 draws under the random-age pipeline before the spec is frozen.
   n_waves: 10              # ages 30-49, two years per wave. Was 5 (ages 30-39)
                            # through Phase 2. Measured on 8192 draws scored on
                            # 2304 held out, 5w -> 10w -> 15w:
@@ -37,6 +41,42 @@ dataset:
   wave_years: 2            # biennial — PSID post-1997 schedule.
   seed: 0
   path: data/processed/phase3_dataset.pt
+
+# Observation window. Shards store the annual panel (ages 20-90), so all of
+# this is a post-hoc aggregation choice -- changing it re-derives from disk in
+# seconds and never re-solves.
+window:
+  mode: random            # 'random' = start age drawn per window, which is what
+                          # a PSID extract actually looks like: households
+                          # appear at whatever ages they happened to be during
+                          # the survey years. 'fixed' = one window per panel at
+                          # dataset.start_age (the old design).
+                          #
+                          # Measured on 8192 training panels, 2816 held out,
+                          # scored on random-age windows (held-out log q):
+                          #   fixed, no age channel          1.649
+                          #   random, 1 window/panel         3.572
+                          #   random, 8 windows/panel        4.219
+                          # and on fixed-age-30 windows, the old design's own
+                          # home turf:    3.657 / 3.499 / 4.182 -- so the
+                          # augmented random model beats the specialist even
+                          # there.
+                          #
+                          # Note the fixed model looked *sharper* on random-age
+                          # data (beta contraction 0.539 vs 0.445) while being
+                          # far less accurate (corr 0.492 vs 0.650). Contraction
+                          # alone would have picked the mis-specified model;
+                          # report accuracy beside it, always.
+  start_age_low: 25       # windows cover ages 25-44 through 40-59: entirely
+  start_age_high: 40      # working life, ending before retirement at 64 and
+                          # short of the ages where the mortality-free forward
+                          # pass (SIMULATOR_SPEC 4) starts to bite.
+  windows_per_panel: 8    # augmentation. Teaches the age mapping; adds no new
+                          # information about theta, so the effective
+                          # independent sample stays the panel count.
+  include_age_feature: true   # per-wave age as a 5th feature. PSID always
+                              # records the head's age, so the posterior should
+                              # condition on it rather than marginalize.
 
 # Embedder — seq_len is taken from dataset.n_waves at build time.
 embedder:

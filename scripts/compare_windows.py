@@ -36,98 +36,36 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy import stats
 
 from hh_npe.data.dataset import read_solver_config
-from hh_npe.data.waves import FEATURES_TWOASSET, aggregate_waves
-from hh_npe.evaluation.sbc import compute_ranks, coverage_at_level, plot_sbc_ranks
+from hh_npe.data.windows import build_windowed, max_start_age, window_panel
+from hh_npe.evaluation.scoring import calibration_scores, estimation_scores
 from hh_npe.npe.embedder import TrajectoryTransformer
 from hh_npe.npe.prior import PHASE3, make_sbi_prior, sample_sobol
 from hh_npe.npe.train import save_posterior, train_npe
-from hh_npe.simulator.dispatch import AGE_START_SIM, simulate_batch_twoasset_gpu
+from hh_npe.simulator.dispatch import simulate_batch_twoasset_gpu
 from hh_npe.utils.seeding import seed_all
 
 log = logging.getLogger("compare_windows")
 
-START_AGE, WAVE_YEARS = 30, 2
+WAVE_YEARS = 2
+AGE_RETIRE = 64  # laibson_calibration.AGE_RETIRE, for the end-age warning
 EMBEDDER = dict(d_model=64, n_heads=4, n_layers=2, output_dim=32)
 TRAINING = dict(flow="nsf", max_num_epochs=200, stop_after_epochs=20,
                 learning_rate=5e-4, batch_size=256, validation_fraction=0.1)
 
 
-def _windowed(panel: dict, n_waves: int):
-    return aggregate_waves(
-        panel, age_start_sim=AGE_START_SIM, start_age=START_AGE,
-        n_waves=n_waves, wave_years=WAVE_YEARS, features=FEATURES_TWOASSET,
-    )
-
-
-def load_split(shard_files: list[Path], n_waves: int, train_n: int, n_total: int):
-    """(train, held-out) at this window, re-aggregated from the stored panels."""
-    theta_all = sample_sobol(n_total, PHASE3, seed=0)
-    split: dict[str, tuple[list, list]] = {"train": ([], []), "heldout": ([], [])}
+def split_shards(shard_files: list[Path], train_n: int):
+    """Shards below the panel cutoff train; the rest are held out."""
+    train, held = [], []
     for sf in shard_files:
-        d = np.load(sf)
-        lo, hi = int(d["lo"]), int(d["hi"])
-        panel = {k[6:]: d[k] for k in d.files if k.startswith("panel_")}
-        if not panel:
-            raise SystemExit(
-                f"{sf.name} stores no annual panel, so the window cannot be "
-                f"changed without re-solving. Only runs generated after the "
-                f"panel change support this comparison."
-            )
-        x, alive = _windowed(panel, n_waves)
-        keep = alive.all(axis=1)
-        bucket = "train" if lo < train_n else "heldout"
-        split[bucket][0].append(theta_all[lo:hi][keep])
-        split[bucket][1].append(x[keep])
-
-    out = {}
-    for k, (ths, xs) in split.items():
-        if not xs:
-            raise SystemExit(f"no {k} shards available")
-        out[k] = (torch.from_numpy(np.concatenate(ths)).float(),
-                  torch.from_numpy(np.concatenate(xs)).float())
-    return out["train"], out["heldout"]
-
-
-def estimation_scores(post, theta, x, n_post: int):
-    prior_var = ((PHASE3.high - PHASE3.low) ** 2) / 12.0
-    means, sds, lps = [], [], []
-    for i in range(len(theta)):
-        s = post.sample((n_post,), x=x[i], show_progress_bars=False)
-        means.append(s.mean(0))
-        sds.append(s.std(0))
-        lps.append(post.log_prob(theta[i][None], x=x[i]).item())
-    means, sds = torch.stack(means).numpy(), torch.stack(sds).numpy()
-    truth = theta.numpy()
-    per_param = {
-        n: {
-            "contraction": float(1 - (sds[:, j] ** 2).mean() / prior_var[j]),
-            "corr": float(np.corrcoef(truth[:, j], means[:, j])[0, 1]),
-            "mae": float(np.abs(means[:, j] - truth[:, j]).mean()),
-        }
-        for j, n in enumerate(PHASE3.names)
-    }
-    return per_param, float(np.mean(lps))
-
-
-def calibration_scores(post, theta, x, n_post: int, out_dir: Path, tag: str):
-    """SBC ranks -> uniformity p-value and 90% interval coverage."""
-    ranks = compute_ranks(post, theta, x, n_posterior_samples=n_post)
-    cov = coverage_at_level(ranks, n_post, level=0.9)
-    per_param = {}
-    for j, n in enumerate(PHASE3.names):
-        # Ranks are uniform on {0..n_post} under calibration; compare the
-        # normalized ranks to Uniform(0,1). A small p-value means miscalibrated.
-        u = (ranks[:, j] + 0.5) / (n_post + 1)
-        ks = stats.kstest(u, "uniform")
-        per_param[n] = {"coverage_90": float(cov[j]),
-                        "ks_p": float(ks.pvalue),
-                        "ks_stat": float(ks.statistic)}
-    plot_sbc_ranks(ranks, n_post, list(PHASE3.names), out_dir / f"sbc_ranks_{tag}.png")
-    np.savez(out_dir / f"sbc_ranks_{tag}.npz", ranks=ranks, coverage_90=cov)
-    return per_param
+        (train if int(np.load(sf)["lo"]) < train_n else held).append(sf)
+    if not train or not held:
+        raise SystemExit(
+            f"need shards on both sides of panel {train_n}; got {len(train)} "
+            f"train and {len(held)} held out"
+        )
+    return train, held
 
 
 def simulate_sbc_once(n_sbc: int, seed: int, solver_config: dict):
@@ -136,8 +74,10 @@ def simulate_sbc_once(n_sbc: int, seed: int, solver_config: dict):
     torch.manual_seed(seed)
     thetas = prior.sample((n_sbc,))
     t0 = time.time()
+    # n_waves here only sizes the throwaway `x`; the panels are what we keep,
+    # and they get windowed per arm afterwards.
     _x, _alive, panels = simulate_batch_twoasset_gpu(
-        thetas.numpy(), seed, START_AGE, n_waves=5, wave_years=WAVE_YEARS,
+        thetas.numpy(), seed, 30, n_waves=5, wave_years=WAVE_YEARS,
         grid=solver_config.get("grid", "full"),
         theta_batch=solver_config["theta_batch"],
         chunk=solver_config["chunk"],
@@ -165,6 +105,16 @@ def main() -> None:
     p.add_argument("--n_post", type=int, default=1000)
     p.add_argument("--n_heldout_eval", type=int, default=2048,
                    help="Held-out draws scored for estimation metrics.")
+    p.add_argument("--start_low", type=int, default=25)
+    p.add_argument("--start_high", type=int, default=40,
+                   help="Start ages are drawn from [low, high] for every arm, "
+                        "so the age distribution is identical and only the "
+                        "window length differs. Note this makes the longer "
+                        "arms reach further past retirement -- reported.")
+    p.add_argument("--k", type=int, default=8,
+                   help="Windows per panel (augmentation).")
+    p.add_argument("--no_age", action="store_true",
+                   help="Drop the per-wave age channel.")
     p.add_argument("--out", type=Path, default=Path("outputs/window_comparison"))
     p.add_argument("--skip_sbc", action="store_true",
                    help="Estimation metrics only; skips the GPU simulations.")
@@ -194,17 +144,44 @@ def main() -> None:
                  f"windows (solver config: {cfg})")
         sbc_thetas, sbc_panels = simulate_sbc_once(args.n_sbc, 20260822, cfg)
 
+    train_sh, held_sh = split_shards(shard_files, args.train_n)
+    theta_all = sample_sobol(args.n_total, PHASE3, seed=0)
+    win = dict(start_low=args.start_low, start_high=args.start_high,
+               wave_years=WAVE_YEARS, with_age=not args.no_age)
+
     results = {}
     for k in args.windows:
-        ages = f"{START_AGE}-{START_AGE + WAVE_YEARS * k - 1}"
-        (th_tr, x_tr), (th_ho, x_ho) = load_split(
-            shard_files, k, args.train_n, args.n_total
+        limit = max_start_age(k, WAVE_YEARS)
+        if args.start_high > limit:
+            raise SystemExit(
+                f"{k} waves cannot start as late as {args.start_high}; the "
+                f"panel runs out at {limit}."
+            )
+        end_lo = args.start_low + WAVE_YEARS * k - 1
+        end_hi = args.start_high + WAVE_YEARS * k - 1
+        ages = f"{args.start_low}-{args.start_high} start, ends {end_lo}-{end_hi}"
+
+        th_tr, x_tr, pid_tr = build_windowed(
+            train_sh, theta_all, k=args.k, n_waves=k, seed=0, **win
+        )
+        th_ho, x_ho, _pid = build_windowed(
+            held_sh, theta_all, k=1, n_waves=k, seed=999, **win
         )
         th_ho, x_ho = th_ho[: args.n_heldout_eval], x_ho[: args.n_heldout_eval]
-        log.info(f"=== {k} waves (ages {ages}) | train {len(th_tr)} | "
-                 f"held-out scored {len(th_ho)} ===")
+        n_panels = len(pid_tr.unique())
+        log.info(f"=== {k} waves ({ages}) | train {len(th_tr)} windows from "
+                 f"{n_panels} panels | held-out scored {len(th_ho)} ===")
+        if end_hi > AGE_RETIRE:
+            # Stated per arm rather than assumed: the forward pass applies no
+            # mortality, so windows reaching past retirement describe a cohort
+            # in which everyone survives. That flatters the longer arms.
+            log.warning(
+                f"  {k}w windows reach age {end_hi}, past retirement at "
+                f"{AGE_RETIRE}. The forward pass has no mortality, so this arm "
+                f"gets a survivorship advantage the shorter arms do not."
+            )
 
-        seed_all(0)  # identical init and validation split for every window
+        seed_all(0)  # identical init and grouped split for every arm
         embedder = TrajectoryTransformer(
             n_features=x_tr.shape[-1], seq_len=k,
             feature_mean=x_tr.mean(dim=(0, 1)), feature_std=x_tr.std(dim=(0, 1)),
@@ -212,23 +189,27 @@ def main() -> None:
         )
         device = "cuda" if torch.cuda.is_available() else "cpu"
         post, _de, _inf = train_npe(
-            th_tr, x_tr, embedder=embedder, box=PHASE3, device=device, **TRAINING
+            th_tr, x_tr, embedder=embedder, box=PHASE3, device=device,
+            group_ids=pid_tr, **TRAINING
         )
         save_posterior(post, embedder, PHASE3, args.out / f"posterior_{k}w.pt")
 
         torch.manual_seed(0)
-        per_param, log_q = estimation_scores(post, th_ho, x_ho, 400)
-        entry = {"ages": ages, "n_train": len(th_tr), "n_heldout": len(th_ho),
+        per_param, log_q = estimation_scores(post, PHASE3, th_ho, x_ho, n_post=400)
+        entry = {"ages": ages, "n_train": len(th_tr), "n_panels": n_panels,
+                 "n_heldout": len(th_ho), "ends_past_retirement": end_hi > AGE_RETIRE,
                  "estimation": per_param, "held_out_log_q": log_q}
 
         if sbc_panels is not None:
-            x_sbc, alive_sbc = _windowed(sbc_panels, k)
-            keep = alive_sbc.all(axis=1)
-            entry["calibration"] = calibration_scores(
-                post, sbc_thetas[keep], torch.from_numpy(x_sbc[keep]).float(),
-                args.n_post, args.out, f"{k}w",
+            # One window per SBC draw, cut the way a training window was.
+            th_sbc, x_sbc, ids = window_panel(
+                sbc_panels, sbc_thetas.numpy(), k=1, n_waves=k, seed=4242, **win
             )
-            entry["n_sbc"] = int(keep.sum())
+            entry["calibration"] = calibration_scores(
+                post, PHASE3, th_sbc, x_sbc,
+                n_post=args.n_post, out_dir=args.out, tag=f"{k}w",
+            )
+            entry["n_sbc"] = len(th_sbc)
         results[k] = entry
         log.info(f"  {k}w done: log q = {log_q:.3f}")
 
@@ -238,8 +219,13 @@ def main() -> None:
 
 def _report(results: dict, windows: list[int]) -> None:
     hdr = "".join(f"{f'{k}w':>12s}" for k in windows)
-    ages = "".join(f"{results[k]['ages']:>12s}" for k in windows)
-    print(f"\n{'':10s}{hdr}\n{'ages':10s}{ages}")
+    print(f"\n{'':10s}{hdr}")
+    print(f"{'ends':10s}" + "".join(
+        f"{results[k]['ages'].split('ends ')[-1]:>12s}" for k in windows))
+    print(f"{'windows':10s}" + "".join(f"{results[k]['n_train']:12d}"
+                                       for k in windows))
+    print(f"{'panels':10s}" + "".join(f"{results[k]['n_panels']:12d}"
+                                      for k in windows))
 
     for metric, fmt in (("contraction", "12.3f"), ("corr", "12.3f"),
                         ("mae", "12.4f")):
@@ -253,6 +239,16 @@ def _report(results: dict, windows: list[int]) -> None:
     print("\n=== held-out log q(theta_true | x) ===")
     print(f"{'':10s}" + "".join(f"{results[k]['held_out_log_q']:12.3f}"
                                 for k in windows))
+
+    flagged = [k for k in windows if results[k]["ends_past_retirement"]]
+    if flagged:
+        print(f"\nNOTE: arms {flagged} reach past retirement at {AGE_RETIRE}. "
+              f"The forward pass applies no mortality, so those windows train\n"
+              f"      on a cohort where everyone survives -- an advantage the "
+              f"shorter arms do not get. Discount accordingly.")
+    print("\nEffective independent sample is the panel count, not the window "
+          "count: augmentation teaches\nthe age mapping, it adds no information "
+          "about theta.")
 
     if "calibration" not in results[windows[0]]:
         return

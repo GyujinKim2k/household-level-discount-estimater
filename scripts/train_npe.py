@@ -18,7 +18,6 @@ import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from hh_npe.data.dataset import load_dataset
 from hh_npe.npe.embedder import TrajectoryTransformer
 from hh_npe.npe.prior import PriorBox
 from hh_npe.npe.train import save_posterior, train_npe
@@ -42,6 +41,26 @@ def build_prior_box(cfg: DictConfig) -> PriorBox:
     return PriorBox(**kwargs)
 
 
+def _load(path, log) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Load a plain or windowed dataset.
+
+    A windowed dataset carries ``panel_id`` because several rows share one
+    simulated household. Those ids must reach the trainer: without them sbi
+    splits rows at random and validates on panels it trained on. Dropping them
+    silently is the failure mode this function exists to prevent, so a windowed
+    file is detected by its contents rather than by configuration.
+    """
+    d = torch.load(Path(path), weights_only=False)
+    theta, x = d["theta"], d["x"]
+    pid = d.get("panel_id")
+    if pid is not None:
+        log.info(
+            f"Windowed dataset: {len(theta)} windows from {len(pid.unique())} "
+            f"panels, meta={d.get('meta')}. Splitting by panel."
+        )
+    return theta, x, pid
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(
@@ -54,7 +73,7 @@ def main(cfg: DictConfig) -> None:
     seed_all(cfg.seed)
 
     npe_cfg = cfg.npe
-    theta, x = load_dataset(npe_cfg.dataset.path)
+    theta, x, group_ids = _load(npe_cfg.dataset.path, log)
     log.info(f"Loaded dataset: theta={tuple(theta.shape)}, x={tuple(x.shape)}")
 
     # Per-feature statistics over the whole training set, so the embedder's
@@ -96,6 +115,7 @@ def main(cfg: DictConfig) -> None:
         validation_fraction=npe_cfg.training.validation_fraction,
         device=device,
         show_progress=True,
+        group_ids=group_ids,
     )
 
     out_path = Path(cfg.output_dir) / "posterior.pt"
