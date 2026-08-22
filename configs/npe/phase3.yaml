@@ -20,7 +20,20 @@ dataset:
                            # 3-parameter problem. Power-of-2 prefixes are
                            # themselves balanced, so partial runs are usable.
   start_age: 30            # first wave covers ages 30-31.
-  n_waves: 5               # ages 30-39, two years per wave.
+  n_waves: 10              # ages 30-49, two years per wave. Was 5 (ages 30-39)
+                           # through Phase 2. Measured on 8192 draws scored on
+                           # 2304 held out, 5w -> 10w -> 15w:
+                           #   beta  contraction 0.412 -> 0.465 -> 0.514
+                           #   delta             0.529 -> 0.617 -> 0.650
+                           #   crra              0.545 -> 0.612 -> 0.619
+                           #   held-out log q    2.874 -> 3.597 -> 3.961
+                           # delta and crra saturate by 10; beta is still
+                           # improving, which fits present bias needing the
+                           # repay half of the borrow-repay arc. 15 is not
+                           # taken: the forward pass applies no mortality, so
+                           # waves past ~50 train on a cohort where everyone
+                           # survives, and that is where 15w gets its edge.
+                           # See SIMULATOR_SPEC 6.1 for the PSID caveat.
   wave_years: 2            # biennial — PSID post-1997 schedule.
   seed: 0
   path: data/processed/phase3_dataset.pt

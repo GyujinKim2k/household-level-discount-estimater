@@ -228,8 +228,40 @@ wave_years·(w+1))` where `t_start = start_age - age_start_sim`. A window
 extending past the simulator's final period raises `ValueError` rather than
 truncating.
 
-All phases pin `wave_years = 2`, `start_age = 30`, `n_waves = 5` → observation
-window **ages 30–39**.
+All phases pin `wave_years = 2` and `start_age = 30`. Phases 1–2 pin
+`n_waves = 5` → ages 30–39. **Phase 3 pins `n_waves = 10` → ages 30–49**
+(changed 2026-08-22, while this spec is still DRAFT and therefore unfrozen).
+
+Measured on the 8192-draw Sobol prefix, scored on 2304 held-out draws, with
+draws, seed, architecture and training config identical across windows:
+
+| | 5w (30–39) | 10w (30–49) | 15w (30–59) |
+|---|---|---|---|
+| `beta` contraction | 0.412 | 0.465 | 0.514 |
+| `delta` contraction | 0.529 | 0.617 | 0.650 |
+| `crra` contraction | 0.545 | 0.612 | 0.619 |
+| held-out log q | 2.874 | 3.597 | 3.961 |
+
+`delta` and `crra` saturate by 10 waves (`crra` gains 0.007 from 10→15).
+`beta` is the only parameter still improving at a constant rate, consistent
+with present bias being identified by the repay half of the borrow-repay arc,
+which ages 30–39 truncates.
+
+**15 waves is rejected despite scoring best.** §4 gives the forward pass no
+mortality — survival enters the backward induction only — so a 15-wave sample
+is one in which every household survives to 59. Real PSID households do not,
+and that mismatch grows with every wave past ~50, precisely where 15w earns
+its advantage.
+
+**Open empirical constraint (must be resolved before Phase 4).** Ten biennial
+waves exist in PSID calendar terms, but requiring a *balanced* ages-30–49
+panel collapses the eligible birth cohorts: within the README's PSID 2005–2013
+target only one cohort (age 30 in 2005) reaches 49 by 2023, and each extra
+required wave compounds attrition. The statistical gain above is therefore an
+upper bound on what the empirical sample can deliver, and the realised N has
+not been checked against a PSID extract — none exists in this tree. If N proves
+too small, the fallback is a shorter window (7–8 waves) or a variable
+`start_age` with the window's calendar position as a conditioning input.
 
 `wave_years = 1` (annual) is implemented and tested but is **not** the
 pre-registered choice. It was considered for Phase 3 on the grounds that

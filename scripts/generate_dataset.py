@@ -188,7 +188,15 @@ def main() -> None:
                         help="Samples per checkpoint shard. A multi-day run must "
                              "survive interruption; shards let it resume.")
     parser.add_argument("--start_age", type=int, default=30)
-    parser.add_argument("--n_waves", type=int, default=5)
+    parser.add_argument("--n_waves", type=int, default=5,
+                        help="Waves of `x` written into each shard. Phase 3's "
+                             "analysis window is 10 (configs/npe/phase3.yaml); "
+                             "this stays 5 so the run in flight since "
+                             "2026-08-20, whose solver_config.json records 5, "
+                             "resumes without a flag after an interruption. It "
+                             "costs nothing: shards store the annual panel, so "
+                             "`--assemble_only --n_waves 10` re-derives any "
+                             "window without re-solving.")
     parser.add_argument("--wave_years", type=int, default=2,
                         help="Years per wave. 2 = biennial (PSID); 1 = annual.")
     parser.add_argument("--seed", type=int, default=0)
