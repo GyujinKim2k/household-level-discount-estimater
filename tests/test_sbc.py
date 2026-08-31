@@ -26,6 +26,61 @@ class FakeUniformPosterior:
         return self.low + u * (self.high - self.low)
 
 
+class DeviceCheckingPosterior(FakeUniformPosterior):
+    """Refuses a tensor that is not on ``_device``, the way sbi's net does.
+
+    sbi does not move inputs; a CPU ``x`` against a CUDA net raises deep inside
+    nflows. Every scoring path had assumed CPU, because until the dataset run
+    finished every job was pinned to CPU with ``CUDA_VISIBLE_DEVICES=""``.
+    """
+
+    def __init__(self, low, high, device="cpu", **kw):
+        super().__init__(low, high, **kw)
+        self._device = device
+
+    def sample(self, shape, x=None, show_progress_bars=False):
+        if x is not None and x.device.type != torch.device(self._device).type:
+            raise RuntimeError(
+                f"Expected all tensors on {self._device}, got x on {x.device}"
+            )
+        return super().sample(shape, x, show_progress_bars)
+
+    def log_prob(self, theta, x=None):
+        for t in (theta, x):
+            if t is not None and t.device.type != torch.device(self._device).type:
+                raise RuntimeError(f"tensor on {t.device}, net on {self._device}")
+        return torch.zeros(len(theta))
+
+
+def test_posterior_device_defaults_to_cpu():
+    from hh_npe.evaluation.sbc import posterior_device
+
+    assert posterior_device(FakeUniformPosterior([0.0], [1.0])).type == "cpu"
+    assert posterior_device(
+        DeviceCheckingPosterior([0.0], [1.0], device="cuda")).type == "cuda"
+
+
+def test_compute_ranks_moves_inputs_to_the_posterior_device():
+    post = DeviceCheckingPosterior(low=[0.0, 0.0], high=[1.0, 1.0], device="cpu")
+    ranks = compute_ranks(post, torch.rand(8, 2), torch.zeros(8, 5, 3),
+                          n_posterior_samples=20)
+    assert ranks.shape == (8, 2)
+
+
+def test_scoring_moves_inputs_to_the_posterior_device():
+    """The crash was here: CPU held-out tensors into a CUDA-trained posterior."""
+    from hh_npe.evaluation.scoring import estimation_scores
+    from hh_npe.npe.prior import PriorBox
+
+    box = PriorBox()
+    post = DeviceCheckingPosterior(low=box.low, high=box.high, device="cpu")
+    per_param, log_q = estimation_scores(
+        post, box, torch.rand(6, box.n_params), torch.zeros(6, 5, 4), n_post=20
+    )
+    assert set(per_param) == set(box.names)
+    assert np.isfinite(log_q)
+
+
 def test_compute_ranks_shape_and_bounds():
     post = FakeUniformPosterior(low=[0.0, 0.0], high=[1.0, 1.0])
     thetas = torch.rand(20, 2)

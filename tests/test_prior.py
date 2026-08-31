@@ -68,6 +68,44 @@ def test_sbi_prior_constructs_and_evaluates():
     assert torch.isfinite(lp).all()
 
 
+def test_sbi_prior_honours_the_requested_device():
+    """sbi asserts prior device == training device; it will not move them.
+
+    Every run of this code until 2026-08-30 forced CUDA_VISIBLE_DEVICES=""
+    to leave the GPU to dataset generation, so a CPU prior always matched.
+    The first GPU training run died on the mismatch.
+    """
+    import torch
+
+    from hh_npe.npe.prior import PHASE3
+
+    assert make_sbi_prior(PHASE3).mean.device.type == "cpu"
+    if torch.cuda.is_available():
+        assert make_sbi_prior(PHASE3, device="cuda").mean.device.type == "cuda"
+
+
+def test_train_npe_builds_the_prior_on_its_training_device(monkeypatch):
+    """The device must be forwarded, not defaulted."""
+    import torch
+
+    from hh_npe.npe import train as train_mod
+
+    seen = {}
+    real = train_mod.make_sbi_prior
+
+    def spy(box, device="cpu"):
+        seen["device"] = device
+        return real(box, device="cpu")  # keep the test on CPU
+
+    monkeypatch.setattr(train_mod, "make_sbi_prior", spy)
+    monkeypatch.setattr(train_mod, "SNPE_C",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("stop")))
+    with pytest.raises(RuntimeError, match="stop"):
+        train_mod.train_npe(torch.zeros(4, 2), torch.zeros(4, 5, 4),
+                            device="cuda")
+    assert seen["device"] == "cuda"
+
+
 def test_two_param_box_is_the_default():
     box = PriorBox()
     assert box.names == ("delta", "crra")

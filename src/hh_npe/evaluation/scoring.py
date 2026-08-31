@@ -24,7 +24,12 @@ import numpy as np
 import torch
 from scipy import stats
 
-from hh_npe.evaluation.sbc import compute_ranks, coverage_at_level, plot_sbc_ranks
+from hh_npe.evaluation.sbc import (
+    compute_ranks,
+    coverage_at_level,
+    plot_sbc_ranks,
+    posterior_device,
+)
 from hh_npe.npe.prior import PriorBox
 
 
@@ -33,14 +38,17 @@ def estimation_scores(
 ) -> tuple[dict, float]:
     """Per-parameter sharpness and accuracy, plus mean held-out log density."""
     prior_var = ((box.high - box.low) ** 2) / 12.0
+    dev = posterior_device(post)
+    theta, x = theta.to(dev), x.to(dev)
     means, sds, lps = [], [], []
     for i in range(len(theta)):
         s = post.sample((n_post,), x=x[i], show_progress_bars=False)
         means.append(s.mean(0))
         sds.append(s.std(0))
         lps.append(post.log_prob(theta[i][None], x=x[i]).item())
-    means, sds = torch.stack(means).numpy(), torch.stack(sds).numpy()
-    truth = theta.numpy()
+    means = torch.stack(means).cpu().numpy()
+    sds = torch.stack(sds).cpu().numpy()
+    truth = theta.cpu().numpy()
     per_param = {
         n: {
             "contraction": float(1 - (sds[:, j] ** 2).mean() / prior_var[j]),

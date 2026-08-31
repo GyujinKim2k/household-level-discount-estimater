@@ -68,8 +68,21 @@ def split_shards(shard_files: list[Path], train_n: int):
     return train, held
 
 
-def simulate_sbc_once(n_sbc: int, seed: int, solver_config: dict):
-    """One GPU pass; the panels are re-windowed per window afterwards."""
+def simulate_sbc_once(n_sbc: int, seed: int, solver_config: dict,
+                      cache: Path | None = None):
+    """One GPU pass; the panels are re-windowed per window afterwards.
+
+    Cached to disk because this is hours of GPU and everything downstream is
+    seconds: a crash after the solves should cost a rerun of the seconds, not
+    of the hours. It did once.
+    """
+    if cache is not None and cache.exists():
+        d = torch.load(cache, weights_only=False)
+        if d["n_sbc"] == n_sbc and d["seed"] == seed:
+            log.info(f"Reusing {n_sbc} cached SBC simulations from {cache}")
+            return d["thetas"], d["panels"]
+        log.warning(f"{cache} holds n_sbc={d['n_sbc']} seed={d['seed']}; "
+                    f"need {n_sbc}/{seed}. Re-simulating.")
     prior = make_sbi_prior(PHASE3)
     torch.manual_seed(seed)
     thetas = prior.sample((n_sbc,))
@@ -84,6 +97,11 @@ def simulate_sbc_once(n_sbc: int, seed: int, solver_config: dict):
         return_panels=True,
     )
     log.info(f"SBC simulations done in {(time.time() - t0) / 3600:.2f} h")
+    if cache is not None:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"thetas": thetas, "panels": panels, "n_sbc": n_sbc,
+                    "seed": seed, "solver_config": solver_config}, cache)
+        log.info(f"Cached SBC simulations to {cache}")
     return thetas, panels
 
 
@@ -95,9 +113,13 @@ def main() -> None:
     p.add_argument("--dataset", type=Path,
                    default=Path("data/processed/phase3_dataset.pt"),
                    help="Only used to locate the recorded solver config.")
-    p.add_argument("--train_n", type=int, default=65536,
-                   help="Draws used for training; the rest are held out. Sobol "
-                        "keeps its balance on power-of-2 prefixes.")
+    p.add_argument("--train_n", type=int, default=57344,
+                   help="Draws used for training; the rest are held out. "
+                        "57344 = 65536 - 8192: both sides are unions of "
+                        "power-of-2 Sobol blocks, so both stay balanced. Was "
+                        "65536 while generation was still running and later "
+                        "shards supplied free held-out draws; with the dataset "
+                        "complete that leaves nothing held out.")
     p.add_argument("--n_total", type=int, default=65536)
     p.add_argument("--n_sbc", type=int, default=1000,
                    help="SBC simulations. These are fresh GPU solves and the "
@@ -116,6 +138,10 @@ def main() -> None:
     p.add_argument("--no_age", action="store_true",
                    help="Drop the per-wave age channel.")
     p.add_argument("--out", type=Path, default=Path("outputs/window_comparison"))
+    p.add_argument("--sbc_cache", type=Path,
+                   default=Path("outputs/window_comparison/sbc_sims.pt"),
+                   help="Where the SBC panels are cached. Reused if it matches "
+                        "--n_sbc and the seed.")
     p.add_argument("--skip_sbc", action="store_true",
                    help="Estimation metrics only; skips the GPU simulations.")
     args = p.parse_args()
@@ -132,6 +158,13 @@ def main() -> None:
     log.info(f"Shard list frozen at {len(shard_files)} shards "
              f"({shard_files[0].name}..{shard_files[-1].name})")
 
+    # Before the SBC solves, not after: this is a millisecond check guarding
+    # hours of GPU, and running it second once cost 3.46 h of simulations that
+    # were still only in memory.
+    train_sh, held_sh = split_shards(shard_files, args.train_n)
+    log.info(f"{len(train_sh)} shards train (< panel {args.train_n}), "
+             f"{len(held_sh)} held out")
+
     sbc_thetas = sbc_panels = None
     if not args.skip_sbc:
         cfg = read_solver_config(args.dataset)
@@ -142,9 +175,9 @@ def main() -> None:
             )
         log.info(f"Simulating {args.n_sbc} SBC draws once, shared across "
                  f"windows (solver config: {cfg})")
-        sbc_thetas, sbc_panels = simulate_sbc_once(args.n_sbc, 20260822, cfg)
+        sbc_thetas, sbc_panels = simulate_sbc_once(args.n_sbc, 20260822, cfg,
+                                                   cache=args.sbc_cache)
 
-    train_sh, held_sh = split_shards(shard_files, args.train_n)
     theta_all = sample_sobol(args.n_total, PHASE3, seed=0)
     win = dict(start_low=args.start_low, start_high=args.start_high,
                wave_years=WAVE_YEARS, with_age=not args.no_age)

@@ -109,7 +109,7 @@ def train_npe(
     if box is None:
         box = PriorBox()
 
-    prior = make_sbi_prior(box)
+    prior = make_sbi_prior(box, device=device)
     de_builder = posterior_nn(
         model=flow,
         embedding_net=embedder,

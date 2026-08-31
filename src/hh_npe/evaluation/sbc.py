@@ -23,6 +23,16 @@ import numpy as np
 import torch
 
 
+def posterior_device(posterior) -> torch.device:
+    """The device a posterior's net lives on.
+
+    sbi keeps the net wherever it was trained and does *not* move inputs to
+    match; feeding it a CPU ``x`` raises deep inside nflows. Callers must move
+    their tensors themselves, so they need to know where.
+    """
+    return torch.device(getattr(posterior, "_device", "cpu"))
+
+
 def compute_ranks(
     posterior,
     thetas: torch.Tensor,
@@ -39,6 +49,8 @@ def compute_ranks(
             f"thetas and xs must have the same n_sim; got {thetas.shape[0]} vs {xs.shape[0]}"
         )
     n_sim, n_params = thetas.shape
+    dev = posterior_device(posterior)
+    thetas, xs = thetas.to(dev), xs.to(dev)
     ranks = np.zeros((n_sim, n_params), dtype=int)
     for i in range(n_sim):
         samples = posterior.sample(

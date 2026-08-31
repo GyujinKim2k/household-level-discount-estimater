@@ -97,18 +97,22 @@ def sample_sobol(
     return qmc.scale(u, box.low, box.high)
 
 
-def make_sbi_prior(box: PriorBox = PriorBox()) -> "BoxUniform":
+def make_sbi_prior(box: PriorBox = PriorBox(),
+                   device: str = "cpu") -> "BoxUniform":
     """Return an sbi-compatible ``BoxUniform`` prior on the same ``box``.
 
     Used by sbi during NPE training for log-density evaluation. Sampling from
     this object is pseudo-random (not Sobol); use :func:`sample_sobol` to
     generate training points and pass them via sbi's pre-existing-samples
     interface.
+
+    ``device`` must match the device passed to ``SNPE_C``; sbi asserts on the
+    mismatch rather than moving the tensors itself.
     """
     import torch
     from sbi.utils import BoxUniform
 
     return BoxUniform(
-        low=torch.tensor(box.low, dtype=torch.float32),
-        high=torch.tensor(box.high, dtype=torch.float32),
+        low=torch.tensor(box.low, dtype=torch.float32, device=device),
+        high=torch.tensor(box.high, dtype=torch.float32, device=device),
     )
