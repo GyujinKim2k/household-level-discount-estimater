@@ -233,7 +233,7 @@ All phases pin `wave_years = 2`. Phases 1–2 pin `start_age = 30` and
 
 **Phase 3 draws the start age at random** from `U{25..40}` and cuts **8 windows
 per simulated panel** (changed 2026-08-22, while this spec is still DRAFT and
-therefore unfrozen). `n_waves = 10` is **provisional** — see §6.1.2.
+therefore unfrozen). `n_waves = 10`, settled on the full dataset — see §6.1.2.
 
 ### 6.1.1 Why the window is random
 
@@ -276,34 +276,66 @@ about `theta` — they teach the age mapping. Training splits by panel
 (`hh_npe.npe.train._use_grouped_split`) because a row-wise split would validate
 on households the model trained on.
 
-### 6.1.2 Wave count — provisional
+### 6.1.2 Wave count — settled 2026-08-31
 
-`n_waves = 10` is a working choice, **not yet settled**. The figures below were
-measured on the 8192-draw prefix under the *old* fixed-window design. The wave
-count is being re-decided on all 65536 draws under the random-age pipeline
-(`scripts/compare_windows.py`, queued behind generation) before this spec is
-frozen.
+`n_waves = 10`, decided on the complete 65536-draw dataset under the random-age
+pipeline (`scripts/compare_windows.py`, `outputs/window_comparison/`). Each arm
+trained on 57344 panels (458752 windows), scored on 2048 held-out draws and
+1000 SBC draws, with draws, seed, architecture and training config identical
+across arms; start ages are drawn from the same `U{25..40}` in every arm, so
+only the window length differs.
 
-Measured on the 8192-draw Sobol prefix, scored on 2304 held-out draws, with
-draws, seed, architecture and training config identical across windows:
-
-| | 5w (30–39) | 10w (30–49) | 15w (30–59) |
+| | 5w (ends 34–49) | 10w (ends 44–59) | 15w (ends 54–69) |
 |---|---|---|---|
-| `beta` contraction | 0.412 | 0.465 | 0.514 |
-| `delta` contraction | 0.529 | 0.617 | 0.650 |
-| `crra` contraction | 0.545 | 0.612 | 0.619 |
-| held-out log q | 2.874 | 3.597 | 3.961 |
+| `beta` contraction | 0.531 | 0.644 | **0.741** |
+| `delta` contraction | 0.578 | 0.678 | **0.757** |
+| `crra` contraction | 0.643 | 0.782 | **0.868** |
+| `beta` corr | 0.707 | 0.793 | **0.833** |
+| `delta` corr | 0.753 | 0.822 | **0.850** |
+| `crra` corr | 0.789 | 0.873 | **0.917** |
+| `beta` MAE | 0.1123 | 0.0926 | **0.0806** |
+| `delta` MAE | 0.0207 | 0.0171 | **0.0151** |
+| `crra` MAE | 0.5430 | 0.3923 | **0.3049** |
+| held-out log q | 4.272 | 5.195 | **5.747** |
 
-`delta` and `crra` saturate by 10 waves (`crra` gains 0.007 from 10→15).
-`beta` is the only parameter still improving at a constant rate, consistent
-with present bias being identified by the repay half of the borrow-repay arc,
-which ages 30–39 truncates.
+**Every estimation metric prefers 15 waves, monotonically. Calibration prefers
+10, and calibration decides.**
 
-**15 waves is rejected despite scoring best.** §4 gives the forward pass no
-mortality — survival enters the backward induction only — so a 15-wave sample
-is one in which every household survives to 59. Real PSID households do not,
-and that mismatch grows with every wave past ~50, precisely where 15w earns
-its advantage.
+| SBC | 5w | 10w | 15w |
+|---|---|---|---|
+| `beta` ks_p | 0.2524 | **0.0975** | 0.0501 |
+| `delta` ks_p | 0.0000 | **0.2263** | 0.0019 |
+| `crra` ks_p | 0.0007 | **0.2941** | 0.0001 |
+| `beta` coverage_90 | 0.909 | 0.909 | 0.868 |
+| `delta` coverage_90 | 0.886 | 0.890 | 0.843 |
+| `crra` coverage_90 | 0.866 | 0.889 | 0.872 |
+
+10 waves is the **only** arm whose SBC ranks are uniform on all three
+parameters. 5w rejects on `delta` and `crra`; 15w rejects on `delta` and `crra`
+and sits on the line for `beta`. The conclusion survives Bonferroni over the
+nine tests (0.05/9 = 0.0056): both rejected arms fail below the corrected
+threshold, while 10w's worst p-value clears even the uncorrected one.
+
+A posterior that fails rank uniformity states uncertainty that is wrong. 5w and
+15w therefore do not offer a sharpness-versus-honesty trade to be priced — they
+are not admissible. Note 15w is simultaneously the most contracted arm on every
+parameter *and* the only one that undercovers on every parameter: sharpest and
+least honest at once, the failure mode §6.1.1's warning describes, now observed
+a second time.
+
+**15 waves is separately confounded.** §4 gives the forward pass no mortality —
+survival enters the backward induction only — so 15-wave windows reaching age 69
+describe a cohort in which everyone survives, and they cross retirement at 64
+into a regime the shorter arms never enter. This was the original reason for
+rejecting 15w and it still holds, but it is now corroboration rather than the
+argument: it rests on a modeling assumption, whereas the KS rejection is
+measured. `scripts/compare_windows.py` warns per arm at runtime and records
+`ends_past_retirement` in `results.json`.
+
+**On reading coverage beside ks_p.** 5w's coverage looks respectable (0.886,
+0.866) where KS rejects outright. Coverage probes a single quantile; KS tests
+the whole rank distribution. Where they disagree, KS is the stricter and the
+one to trust.
 
 **Empirical constraint — largely dissolved by §6.1.1, not yet closed.** Ten
 biennial waves exist in PSID calendar terms, but requiring a *balanced
@@ -314,11 +346,18 @@ The random-age window removes that specific bind — households no longer need
 to be observed at one particular age range, so every cohort with 10 consecutive
 biennial observations qualifies, whatever age it happens to be. What remains is
 the requirement of 10 consecutive waves at all, which still compounds attrition
-relative to 5. That is exactly what §6.1.2's full-dataset comparison is meant to
-price, and the realised N still has not been checked against a PSID extract —
-none exists in this tree. If N proves too small, the fallback is a shorter
-window; the `windows` module supports any length the panel can hold, at no
-regeneration cost.
+relative to 5.
+
+**This is now the last unverified assumption in the observation model, and the
+one place §6.1.2 offers no fallback.** The realised N has still not been checked
+against a PSID extract — none exists in this tree. Previously a small N could
+have been answered by dropping to 5 waves at some cost in sharpness; §6.1.2
+closes that exit, because the 5-wave posterior is miscalibrated, not merely
+blunter. If PSID cannot supply enough households with 10 consecutive biennial
+observations, the remedy is a re-run of `scripts/compare_windows.py` over
+intermediate lengths (6, 7, 8, 9 waves are all free — the panels are stored and
+no re-solve is needed) to find the shortest window that still passes SBC, not a
+silent fall back to 5.
 
 `wave_years = 1` (annual) is implemented and tested but is **not** the
 pre-registered choice. It was considered for Phase 3 on the grounds that

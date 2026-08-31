@@ -19,24 +19,37 @@ dataset:
   n_samples: 65536         # Sobol draws; power of 2. 8x Phase 2 for a
                            # 3-parameter problem. Power-of-2 prefixes are
                            # themselves balanced, so partial runs are usable.
-  start_age: 30            # first wave covers ages 30-31.
-  # PROVISIONAL pending the full-dataset comparison (scripts/compare_windows.py,
-  # queued behind generation). The figures below were measured on the 8192-draw
-  # prefix under the old fixed-window design; the wave count is being re-decided
-  # on all 65536 draws under the random-age pipeline before the spec is frozen.
-  n_waves: 10              # ages 30-49, two years per wave. Was 5 (ages 30-39)
-                           # through Phase 2. Measured on 8192 draws scored on
-                           # 2304 held out, 5w -> 10w -> 15w:
-                           #   beta  contraction 0.412 -> 0.465 -> 0.514
-                           #   delta             0.529 -> 0.617 -> 0.650
-                           #   crra              0.545 -> 0.612 -> 0.619
-                           #   held-out log q    2.874 -> 3.597 -> 3.961
-                           # delta and crra saturate by 10; beta is still
-                           # improving, which fits present bias needing the
-                           # repay half of the borrow-repay arc. 15 is not
-                           # taken: the forward pass applies no mortality, so
-                           # waves past ~50 train on a cohort where everyone
-                           # survives, and that is where 15w gets its edge.
+  start_age: 30            # legacy fixed-window anchor; with window.mode=random
+                           # the start age is drawn per window and this only
+                           # sizes the throwaway `x` written into each shard.
+  # SETTLED 2026-08-31 on all 65536 draws under the random-age pipeline
+  # (scripts/compare_windows.py, outputs/window_comparison/results.json).
+  n_waves: 10              # two years per wave. Was 5 through Phase 2.
+                           # 57344 training panels (458752 windows) per arm,
+                           # 2048 held out, 1000 SBC draws. 5w -> 10w -> 15w:
+                           #   beta  contraction 0.531 -> 0.644 -> 0.741
+                           #   delta             0.578 -> 0.678 -> 0.757
+                           #   crra              0.643 -> 0.782 -> 0.868
+                           #   held-out log q    4.272 -> 5.195 -> 5.747
+                           # Every estimation metric prefers 15. Calibration
+                           # does not, and calibration decides:
+                           #   SBC ks_p   5w      10w     15w
+                           #     beta   0.2524  0.0975  0.0501
+                           #     delta  0.0000  0.2263  0.0019
+                           #     crra   0.0007  0.2941  0.0001
+                           # 10 is the ONLY arm whose ranks are uniform on all
+                           # three parameters, and it survives Bonferroni over
+                           # the 9 tests (0.05/9 = 0.0056). 5w and 15w both
+                           # produce posteriors whose stated uncertainty is
+                           # wrong. 15w also undercovers everywhere (coverage_90
+                           # 0.868/0.843/0.872 vs nominal 0.900) while having
+                           # the highest contraction: sharpest and least honest
+                           # at once.
+                           # 15w is separately confounded -- its windows reach
+                           # age 69 and the forward pass applies no mortality,
+                           # so it trains on a cohort where everyone survives.
+                           # That argument now only corroborates; the KS
+                           # rejection is measured and does not rest on it.
                            # See SIMULATOR_SPEC 6.1 for the PSID caveat.
   wave_years: 2            # biennial — PSID post-1997 schedule.
   seed: 0
