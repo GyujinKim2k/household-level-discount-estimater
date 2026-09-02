@@ -188,15 +188,13 @@ def main() -> None:
                         help="Samples per checkpoint shard. A multi-day run must "
                              "survive interruption; shards let it resume.")
     parser.add_argument("--start_age", type=int, default=30)
-    parser.add_argument("--n_waves", type=int, default=10,
+    parser.add_argument("--n_waves", type=int, default=7,
                         help="Waves of `x` written into each shard, and the "
-                             "window `--assemble_only` produces. 10 is Phase "
-                             "3's settled analysis window (SIMULATOR_SPEC "
-                             "6.1.2, decided on the full dataset 2026-08-31). "
-                             "Held at 5 until then only so the run in flight "
-                             "from 2026-08-20, whose solver_config.json "
-                             "records 5, could resume without a flag; that run "
-                             "completed 2026-08-29. Existing 5-wave shards are "
+                             "window `--assemble_only` produces. 7 is Phase "
+                             "3's analysis window (SIMULATOR_SPEC 6.1.2): it "
+                             "is what PSID can supply with a clean credit-card "
+                             "measure (PSID_DATA.md), and it is calibrated once "
+                             "ensembled. Existing shards at any wave count are "
                              "unaffected -- they store the annual panel, so "
                              "`assemble` re-derives any window from them "
                              "without re-solving.")

@@ -3,7 +3,7 @@
 **Status:** DRAFT — not yet frozen.
 **Phase:** Phase 3 (two-asset, credit cards, present bias). Port **validated**
 against Laibson et al.'s published simulation (§7.1).
-**Last updated:** 2026-08-13.
+**Last updated:** 2026-09-02.
 
 This document specifies the lifecycle consumption-saving simulator used to
 generate training data for the household-level NPE. It must be **frozen
@@ -231,9 +231,12 @@ truncating.
 All phases pin `wave_years = 2`. Phases 1–2 pin `start_age = 30` and
 `n_waves = 5` → ages 30–39.
 
-**Phase 3 draws the start age at random** from `U{25..40}` and cuts **8 windows
-per simulated panel** (changed 2026-08-22, while this spec is still DRAFT and
-therefore unfrozen). `n_waves = 10`, settled on the full dataset — see §6.1.2.
+**Phase 3 draws the start age at random** and cuts **8 windows per simulated
+panel** (changed 2026-08-22, while this spec is still DRAFT and therefore
+unfrozen). The current setting is `n_waves = 7` with start age from `U{25..46}`
+— see §6.1.2 for how that was decided and §6.1.3 for why a single trained flow
+is not enough. `start_age_high` is paired with `n_waves` so the age envelope
+stays 25–59; it is not independently tunable.
 
 ### 6.1.1 Why the window is random
 
@@ -276,88 +279,120 @@ about `theta` — they teach the age mapping. Training splits by panel
 (`hh_npe.npe.train._use_grouped_split`) because a row-wise split would validate
 on households the model trained on.
 
-### 6.1.2 Wave count — settled 2026-08-31
+### 6.1.2 Wave count — settled 2026-09-02 at `n_waves = 7`
 
-`n_waves = 10`, decided on the complete 65536-draw dataset under the random-age
-pipeline (`scripts/compare_windows.py`, `outputs/window_comparison/`). Each arm
-trained on 57344 panels (458752 windows), scored on 2048 held-out draws and
-1000 SBC draws, with draws, seed, architecture and training config identical
-across arms; start ages are drawn from the same `U{25..40}` in every arm, so
-only the window length differs.
+**`n_waves = 7`, `wave_years = 2`, start age drawn from `U{25..46}`.** Windows
+span 14 years and lie inside ages 25–59.
 
-| | 5w (ends 34–49) | 10w (ends 44–59) | 15w (ends 54–69) |
+This is the third answer to this question. The first two were wrong, and both
+failed the same way, so the method matters more than the number.
+
+| date | claim | status |
+|---|---|---|
+| 2026-08-31 | 10 waves — "the only arm whose ranks are uniform on all three" | **retracted** |
+| 2026-08-31 | 7 waves fails SBC; PSID cannot support the model | **retracted** |
+| 2026-09-02 | 7 waves, `k=8`, 5-member ensemble | current |
+
+**The error.** Each arm was trained once and judged on one KS p-value per
+parameter. Under the null of perfect calibration a KS p-value is `Uniform(0,1)`
+*by construction*, so a single draw is a maximally noisy statistic. Training 7
+waves five times — holding the dataset, the panel split and the 1000 SBC draws
+fixed, varying only network initialisation — moved the p-values over two to
+three orders of magnitude: seed 1 passed all three parameters, seed 2 failed
+all three. The published "10 waves is the only arm that passes" was a statement
+about which seed 10 waves happened to draw.
+
+A Bonferroni correction was offered as robustness at the time and did not help:
+it controls multiplicity while leaving single-draw variance untouched, and
+invoking it to *accept* a null makes the test weaker, not the conclusion safer.
+
+**The rule that replaces it.** Decide on **coverage**, whose spread across
+seeds is 0.004–0.012. Report the per-seed KS pass rate beside it as a secondary,
+replication-aware figure. Never decide on a lone `ks_p`.
+
+**Age envelopes must be matched.** Every arm previously started in `U{25..40}`,
+so a longer window also reached older ages — length was confounded with depth
+into life, which is the same defect already flagged against the 15-wave arm and
+which went unnoticed through the entire 5/6/7/8/9/10/15 comparison. Both
+surviving arms now occupy ages 25–59 exactly:
+
+```
+10 waves (20 yrs): start U{25..40} -> ends 44-59
+ 7 waves (14 yrs): start U{25..46} -> ends 38-59
+```
+
+`window.start_age_high` is therefore **paired with `n_waves`**:
+`high = 59 - 2·n_waves + 1`. The start distributions still differ (16 vs 22
+choices), which is unavoidable at different lengths; the envelope is the
+confound that matters, because it carries the retirement crossing and the
+mortality-free forward pass (§4).
+
+**Replicated result.** 5 training seeds per arm, 57,344 panels, `k=8`, 2048
+held-out draws, 1000 shared SBC draws, ensembled per §6.1.3:
+
+| | 7 waves | 10 waves |
+|---|---|---|
+| held-out log q (ensemble) | 5.007 | **5.446** |
+| coverage `beta` | 0.916 | 0.925 |
+| coverage `delta` | **0.902** | 0.904 |
+| coverage `crra` | **0.905** | 0.908 |
+| KS, all three | pass | pass |
+
+**Ten waves is genuinely sharper — 0.44 nats, stable across seeds — and both
+are calibrated once ensembled.** The wave count is not chosen on calibration,
+because calibration no longer discriminates. It is chosen on what PSID can
+supply: credit-card debt is separable only from 2011, giving exactly seven
+biennial waves (`PSID_DATA.md`). Seven costs 0.44 nats and keeps calibration.
+
+If a data source offering ten clean waves appears, ten is the better window and
+`start_age_high` moves to 40 with it.
+
+**On the earlier single-model numbers.** Every pre-ensemble figure in this
+document's history showed coverage near 0.87 against a nominal 0.90. That is
+real and reproducible, and it is a property of a *single* flow, not of the wave
+count — see §6.1.3. Do not quote single-model calibration as the model's.
+
+### 6.1.3 Ensembling is required, not an optimization
+
+A single trained flow is miscalibrated. Across five seeds at 7 waves, coverage
+sits at 0.881 / 0.878 / 0.873 against a nominal 0.900, with seed standard
+deviations of 0.004–0.012 — the ~0.03 shortfall is far outside noise. Credible
+intervals from one flow are systematically too narrow.
+
+The cause is approximation **variance**. Less informative data cannot produce
+miscalibration: it produces a *wider* true posterior, and a correctly
+approximated wide posterior still passes SBC. Non-uniform ranks mean
+`q(θ|x) ≠ p(θ|x)`. The seed experiment localises it — with data, split and SBC
+draws all fixed, each fitted flow lands somewhere different and each is
+overconfident about its own landing spot.
+
+**The remedy is a uniform mixture of 5 independently initialised models**
+(sbi `EnsemblePosterior`), which is what variance calls for:
+
+| | mean of 5 | best of 5 | ensemble |
 |---|---|---|---|
-| `beta` contraction | 0.531 | 0.644 | **0.741** |
-| `delta` contraction | 0.578 | 0.678 | **0.757** |
-| `crra` contraction | 0.643 | 0.782 | **0.868** |
-| `beta` corr | 0.707 | 0.793 | **0.833** |
-| `delta` corr | 0.753 | 0.822 | **0.850** |
-| `crra` corr | 0.789 | 0.873 | **0.917** |
-| `beta` MAE | 0.1123 | 0.0926 | **0.0806** |
-| `delta` MAE | 0.0207 | 0.0171 | **0.0151** |
-| `crra` MAE | 0.5430 | 0.3923 | **0.3049** |
-| held-out log q | 4.272 | 5.195 | **5.747** |
+| held-out log q | 4.763 | 4.772 | **5.007** |
+| coverage `beta` | 0.881 | 0.894 | 0.916 |
+| coverage `delta` | 0.878 | 0.881 | **0.902** |
+| coverage `crra` | 0.873 | 0.890 | **0.905** |
 
-**Every estimation metric prefers 15 waves, monotonically. Calibration prefers
-10, and calibration decides.**
+It beats the *best* member by 0.24 nats, not merely the average, and every KS
+test passes. The effect is robust to augmentation — it holds at `k` = 5, 8 and
+10 alike.
 
-| SBC | 5w | 10w | 15w |
-|---|---|---|---|
-| `beta` ks_p | 0.2524 | **0.0975** | 0.0501 |
-| `delta` ks_p | 0.0000 | **0.2263** | 0.0019 |
-| `crra` ks_p | 0.0007 | **0.2941** | 0.0001 |
-| `beta` coverage_90 | 0.909 | 0.909 | 0.868 |
-| `delta` coverage_90 | 0.886 | 0.890 | 0.843 |
-| `crra` coverage_90 | 0.866 | 0.889 | 0.872 |
+Augmentation is **not** an alternative remedy. `k` adds correlated windows from
+the same 57,344 panels and carries no information about `θ` (§6.1.1); measured
+coverage is flat in `k` (0.866–0.888 at every level), exactly as that predicts.
+`k = 8` is chosen on `log q`, where it saturates: `k=10` ties at 5.007 for 25%
+more rows and `k=5` costs 0.19 nats.
 
-10 waves is the **only** arm whose SBC ranks are uniform on all three
-parameters. 5w rejects on `delta` and `crra`; 15w rejects on `delta` and `crra`
-and sits on the line for `beta`. The conclusion survives Bonferroni over the
-nine tests (0.05/9 = 0.0056): both rejected arms fail below the corrected
-threshold, while 10w's worst p-value clears even the uncorrected one.
-
-A posterior that fails rank uniformity states uncertainty that is wrong. 5w and
-15w therefore do not offer a sharpness-versus-honesty trade to be priced — they
-are not admissible. Note 15w is simultaneously the most contracted arm on every
-parameter *and* the only one that undercovers on every parameter: sharpest and
-least honest at once, the failure mode §6.1.1's warning describes, now observed
-a second time.
-
-**15 waves is separately confounded.** §4 gives the forward pass no mortality —
-survival enters the backward induction only — so 15-wave windows reaching age 69
-describe a cohort in which everyone survives, and they cross retirement at 64
-into a regime the shorter arms never enter. This was the original reason for
-rejecting 15w and it still holds, but it is now corroboration rather than the
-argument: it rests on a modeling assumption, whereas the KS rejection is
-measured. `scripts/compare_windows.py` warns per arm at runtime and records
-`ends_past_retirement` in `results.json`.
-
-**On reading coverage beside ks_p.** 5w's coverage looks respectable (0.886,
-0.866) where KS rejects outright. Coverage probes a single quantile; KS tests
-the whole rank distribution. Where they disagree, KS is the stricter and the
-one to trust.
-
-**Empirical constraint — largely dissolved by §6.1.1, not yet closed.** Ten
-biennial waves exist in PSID calendar terms, but requiring a *balanced
-ages-30–49* panel collapsed the eligible birth cohorts: within the README's
-PSID 2005–2013 target only one cohort (age 30 in 2005) reaches 49 by 2023.
-
-The random-age window removes that specific bind — households no longer need
-to be observed at one particular age range, so every cohort with 10 consecutive
-biennial observations qualifies, whatever age it happens to be. What remains is
-the requirement of 10 consecutive waves at all, which still compounds attrition
-relative to 5.
-
-**This is now the last unverified assumption in the observation model, and the
-one place §6.1.2 offers no fallback.** The realised N has still not been checked
-against a PSID extract — none exists in this tree. Previously a small N could
-have been answered by dropping to 5 waves at some cost in sharpness; §6.1.2
-closes that exit, because the 5-wave posterior is miscalibrated, not merely
-blunter. If PSID cannot supply enough households with 10 consecutive biennial
-observations, the remedy is a re-run of `scripts/compare_windows.py` over
-intermediate lengths (6, 7, 8, 9 waves are all free — the panels are stored and
-no re-solve is needed) to find the shortest window that still passes SBC, not a
-silent fall back to 5.
+**Unresolved.** The correction slightly overshoots on `beta` — 0.916 against
+0.900, about 1.7 SE at `n_sbc = 1000`, and smaller at `k=5` (0.907).
+Overcoverage is the conservative direction and far milder than the
+undercoverage it replaced, but it is not established either way: only one
+ensemble per cell was measured, and separating it from noise needs several
+independent ensembles (25 training runs per cell). Do not tune it away on a
+single measurement — that is the error this section exists to prevent.
 
 `wave_years = 1` (annual) is implemented and tested but is **not** the
 pre-registered choice. It was considered for Phase 3 on the grounds that

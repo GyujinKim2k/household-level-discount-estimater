@@ -137,6 +137,20 @@ def main() -> None:
                    help="Windows per panel (augmentation).")
     p.add_argument("--no_age", action="store_true",
                    help="Drop the per-wave age channel.")
+    p.add_argument("--batch_size", type=int, default=256,
+                   help="Training minibatch. The default starves the GPU: the "
+                        "model is ~200k parameters on (batch, waves, 5) inputs, "
+                        "so a V100 sits near 11%% and ~98%% of wall time is "
+                        "kernel-launch latency, not compute. Raising this cuts "
+                        "step count proportionally -- scale --learning_rate with "
+                        "it, and keep both fixed across every arm of a "
+                        "comparison.")
+    p.add_argument("--learning_rate", type=float, default=5e-4)
+    p.add_argument("--train_seed", type=int, default=0,
+                   help="Seeds network init and batch order only. The dataset, "
+                        "the panel split and the SBC draws have their own fixed "
+                        "seeds, so this isolates optimization noise -- use it to "
+                        "tell a real calibration difference from scatter.")
     p.add_argument("--out", type=Path, default=Path("outputs/window_comparison"))
     p.add_argument("--sbc_cache", type=Path,
                    default=Path("outputs/window_comparison/sbc_sims.pt"),
@@ -214,16 +228,22 @@ def main() -> None:
                 f"gets a survivorship advantage the shorter arms do not."
             )
 
-        seed_all(0)  # identical init and grouped split for every arm
+        # Identical init and batch order for every arm at a given --train_seed.
+        # Varying only this seed holds the data, the panel split and the SBC
+        # draws fixed (their seeds are passed explicitly above), so a spread in
+        # calibration across seeds is optimization noise and nothing else.
+        seed_all(args.train_seed)
         embedder = TrajectoryTransformer(
             n_features=x_tr.shape[-1], seq_len=k,
             feature_mean=x_tr.mean(dim=(0, 1)), feature_std=x_tr.std(dim=(0, 1)),
             **EMBEDDER,
         )
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        training = {**TRAINING, "batch_size": args.batch_size,
+                    "learning_rate": args.learning_rate}
         post, _de, _inf = train_npe(
             th_tr, x_tr, embedder=embedder, box=PHASE3, device=device,
-            group_ids=pid_tr, **TRAINING
+            group_ids=pid_tr, **training
         )
         save_posterior(post, embedder, PHASE3, args.out / f"posterior_{k}w.pt")
 
@@ -246,6 +266,20 @@ def main() -> None:
         results[k] = entry
         log.info(f"  {k}w done: log q = {log_q:.3f}")
 
+    # Self-describing: arms are now compared across age envelopes, batch sizes
+    # and training seeds, and a results.json that records only the numbers is
+    # one filename away from being read as something it is not.
+    results["_config"] = {
+        "start_low": args.start_low, "start_high": args.start_high,
+        "k_windows_per_panel": args.k, "wave_years": WAVE_YEARS,
+        "train_n": args.train_n, "train_seed": args.train_seed,
+        "batch_size": args.batch_size, "learning_rate": args.learning_rate,
+        "n_sbc": args.n_sbc, "n_post": args.n_post,
+        "n_heldout_eval": args.n_heldout_eval,
+        "age_envelope": [args.start_low,
+                         max(args.start_high + WAVE_YEARS * k - 1
+                             for k in args.windows)],
+    }
     (args.out / "results.json").write_text(json.dumps(results, indent=2))
     _report(results, args.windows)
 

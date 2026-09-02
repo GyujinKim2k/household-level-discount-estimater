@@ -22,35 +22,34 @@ dataset:
   start_age: 30            # legacy fixed-window anchor; with window.mode=random
                            # the start age is drawn per window and this only
                            # sizes the throwaway `x` written into each shard.
-  # SETTLED 2026-08-31 on all 65536 draws under the random-age pipeline
-  # (scripts/compare_windows.py, outputs/window_comparison/results.json).
-  n_waves: 10              # two years per wave. Was 5 through Phase 2.
-                           # 57344 training panels (458752 windows) per arm,
-                           # 2048 held out, 1000 SBC draws. 5w -> 10w -> 15w:
-                           #   beta  contraction 0.531 -> 0.644 -> 0.741
-                           #   delta             0.578 -> 0.678 -> 0.757
-                           #   crra              0.643 -> 0.782 -> 0.868
-                           #   held-out log q    4.272 -> 5.195 -> 5.747
-                           # Every estimation metric prefers 15. Calibration
-                           # does not, and calibration decides:
-                           #   SBC ks_p   5w      10w     15w
-                           #     beta   0.2524  0.0975  0.0501
-                           #     delta  0.0000  0.2263  0.0019
-                           #     crra   0.0007  0.2941  0.0001
-                           # 10 is the ONLY arm whose ranks are uniform on all
-                           # three parameters, and it survives Bonferroni over
-                           # the 9 tests (0.05/9 = 0.0056). 5w and 15w both
-                           # produce posteriors whose stated uncertainty is
-                           # wrong. 15w also undercovers everywhere (coverage_90
-                           # 0.868/0.843/0.872 vs nominal 0.900) while having
-                           # the highest contraction: sharpest and least honest
-                           # at once.
-                           # 15w is separately confounded -- its windows reach
-                           # age 69 and the forward pass applies no mortality,
-                           # so it trains on a cohort where everyone survives.
-                           # That argument now only corroborates; the KS
-                           # rejection is measured and does not rest on it.
-                           # See SIMULATOR_SPEC 6.1 for the PSID caveat.
+  # SETTLED 2026-09-02, and this is the THIRD answer to this question.
+  # The first two were wrong for the same reason: a single KS p-value per arm
+  # was read as a property of the wave count. Under perfect calibration a KS
+  # p-value is Uniform(0,1) by construction, so one draw is a maximally noisy
+  # statistic. Replication (5 training seeds, data/split/SBC draws all held
+  # fixed) moved it over 2-3 orders of magnitude at a single wave count.
+  # History, so it is not repeated:
+  #   2026-08-31  "10 waves, the only arm whose ranks are uniform"  RETRACTED
+  #   2026-08-31  "7 waves fails SBC, PSID cannot support this"     RETRACTED
+  # Decide on COVERAGE (sd 0.004-0.012 across seeds), never on a lone ks_p.
+  n_waves: 7               # two years per wave -> 14 years per window.
+                           # Chosen because PSID supplies exactly 7 biennial
+                           # waves with a clean credit-card measure, 2011-2023
+                           # (PSID_DATA.md). 10 waves is sharper -- ensembled
+                           # held-out log q 5.446 vs 5.007, a real 0.44 nats --
+                           # but PSID cannot deliver it, and 7 is calibrated:
+                           #
+                           #   7 waves, k=8, 5-member ensemble
+                           #     log q      5.007
+                           #     coverage   beta 0.916  delta 0.902  crra 0.905
+                           #     ks_p       0.166 / 0.642 / 0.279   (all pass)
+                           #
+                           # Single models at 7 waves undercover reproducibly
+                           # (0.881/0.878/0.873, sd <= 0.012). That is
+                           # approximation variance, not an information limit,
+                           # and the ensemble below is what fixes it -- see
+                           # `ensemble` and SIMULATOR_SPEC 6.1.3. Do not read
+                           # the single-model numbers as the model's calibration.
   wave_years: 2            # biennial — PSID post-1997 schedule.
   seed: 0
   path: data/processed/phase3_dataset.pt
@@ -80,13 +79,30 @@ window:
                           # far less accurate (corr 0.492 vs 0.650). Contraction
                           # alone would have picked the mis-specified model;
                           # report accuracy beside it, always.
-  start_age_low: 25       # windows cover ages 25-44 through 40-59: entirely
-  start_age_high: 40      # working life, ending before retirement at 64 and
-                          # short of the ages where the mortality-free forward
-                          # pass (SIMULATOR_SPEC 4) starts to bite.
+  start_age_low: 25       # With n_waves=7 (14 years) this puts every window
+  start_age_high: 46      # inside ages 25-59: working life, ending before
+                          # retirement at 64 and short of the ages where the
+                          # mortality-free forward pass (SIMULATOR_SPEC 4)
+                          # starts to bite.
+                          #
+                          # start_age_high is PAIRED WITH n_waves and must move
+                          # with it: high = 59 - 2*n_waves + 1. At 10 waves it
+                          # is 40. Holding it at 40 while shortening the window
+                          # would silently confound length with how deep into
+                          # life the window reaches -- the same defect that
+                          # flattered the 15-wave arm, and which went unnoticed
+                          # through the whole 5/6/7/8/9/10/15 comparison.
   windows_per_panel: 8    # augmentation. Teaches the age mapping; adds no new
                           # information about theta, so the effective
-                          # independent sample stays the panel count.
+                          # independent sample stays the panel count (57344).
+                          # Swept at 7 waves, 5 seeds each, ensembled:
+                          #   k=5   log q 4.816   coverage 0.907/0.893/0.900
+                          #   k=8   log q 5.007   coverage 0.916/0.902/0.905
+                          #   k=10  log q 5.007   coverage 0.918/0.909/0.902
+                          # Saturates at 8: k=10 ties on log q for 25% more
+                          # rows, k=5 costs 0.19 nats. Coverage is flat in k --
+                          # augmentation never touched the undercoverage,
+                          # exactly as "adds no information" predicts.
   include_age_feature: true   # per-wave age as a 5th feature. PSID always
                               # records the head's age, so the posterior should
                               # condition on it rather than marginalize.
@@ -107,13 +123,55 @@ embedder:
                           # mean and spread are set by income and illiquid_assets,
                           # which discards the credit-card signal beta rides on.
 
+# Ensemble — REQUIRED, not an optimization. A single flow is miscalibrated.
+#
+# Five independently initialised models on identical data, combined as a
+# uniform mixture (sbi EnsemblePosterior). Measured at 7 waves, k=8, on 2048
+# held-out draws and 1000 SBC draws:
+#
+#                     single (mean of 5)   best single   ensemble
+#   held-out log q          4.763             4.772        5.007
+#   coverage beta           0.881             0.894        0.916
+#   coverage delta          0.878             0.881        0.902
+#   coverage crra           0.873             0.890        0.905
+#
+# Single models undercover reproducibly (seed sd <= 0.012, so the ~0.03
+# shortfall is far outside noise): their credible intervals are too narrow.
+# The cause is approximation VARIANCE -- holding data, split and SBC draws
+# fixed and varying only initialisation moved KS p-values over 2-3 orders of
+# magnitude, i.e. each fitted flow lands somewhere different and each is
+# overconfident about its own landing spot. Averaging is the matching remedy,
+# and it also beats the BEST member on log q by 0.24 nats, not merely the mean.
+#
+# Report the ensemble. Reporting a single flow means shipping a posterior whose
+# stated uncertainty is known to be too tight -- the first thing a referee will
+# test on a paper whose contribution is a posterior per household.
+ensemble:
+  n_members: 5            # seeds 0-4; vary init and batch order only, holding
+                          # the dataset, the panel split and the SBC draws
+                          # fixed (scripts/run_wave_matrix.sh).
+  weights: uniform
+  # Residual: beta overcovers slightly (0.916 vs 0.900, ~1.7 SE at n_sbc=1000).
+  # Overcoverage is the conservative direction and much milder than what it
+  # replaced, but it is unresolved -- it is smaller at k=5 (0.907), and telling
+  # a real effect from noise needs several independent ensembles per cell (25
+  # training runs), not one. Do not tune it away on a single measurement.
+
 # Training (sbi SNPE-C)
 training:
   algorithm: snpe_c
   flow: nsf               # alt: maf
   num_rounds: 1           # amortized single-round (per headline contribution)
   max_num_epochs: 200
-  batch_size: 256
-  learning_rate: 5e-4
+  batch_size: 256         # 1024/lr 1e-3 runs 2.9x faster (the model is ~200k
+                          # params, so at 256 a V100 sits near 11% and ~98% of
+                          # wall time is kernel-launch latency, not compute) and
+                          # costs ~0.10 nats of held-out log q, with coverage
+                          # identical to within 0.007. The sweeps used 1024 for
+                          # throughput; 256 stays the default for final models,
+                          # where the 0.10 nats matters and the wall time does
+                          # not. Whichever is used, hold it fixed across every
+                          # arm of a comparison.
+  learning_rate: 5e-4     # scale with batch_size if you change it
   validation_fraction: 0.1
   stop_after_epochs: 20

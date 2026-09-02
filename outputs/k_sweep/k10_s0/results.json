@@ -1,0 +1,62 @@
+{
+  "7": {
+    "ages": "25-46 start, ends 38-59",
+    "n_train": 573440,
+    "n_panels": 57344,
+    "n_heldout": 2048,
+    "ends_past_retirement": false,
+    "estimation": {
+      "beta": {
+        "contraction": 0.6060984475272042,
+        "corr": 0.747909597428386,
+        "mae": 0.10335893929004669
+      },
+      "delta": {
+        "contraction": 0.6504801635940871,
+        "corr": 0.7942436667135008,
+        "mae": 0.018399428576231003
+      },
+      "crra": {
+        "contraction": 0.7009314784297236,
+        "corr": 0.8239897002765265,
+        "mae": 0.4769984483718872
+      }
+    },
+    "held_out_log_q": 4.797084033843021,
+    "calibration": {
+      "beta": {
+        "coverage_90": 0.877,
+        "ks_p": 0.45235921266952794,
+        "ks_stat": 0.026986013986014024
+      },
+      "delta": {
+        "coverage_90": 0.878,
+        "ks_p": 0.41398350284665286,
+        "ks_stat": 0.02781618381618378
+      },
+      "crra": {
+        "coverage_90": 0.878,
+        "ks_p": 0.22725786175368923,
+        "ks_stat": 0.03279820179820181
+      }
+    },
+    "n_sbc": 1000
+  },
+  "_config": {
+    "start_low": 25,
+    "start_high": 46,
+    "k_windows_per_panel": 10,
+    "wave_years": 2,
+    "train_n": 57344,
+    "train_seed": 0,
+    "batch_size": 1024,
+    "learning_rate": 0.001,
+    "n_sbc": 1000,
+    "n_post": 1000,
+    "n_heldout_eval": 2048,
+    "age_envelope": [
+      25,
+      59
+    ]
+  }
+}
