@@ -14,6 +14,7 @@ shipping a posterior whose stated uncertainty is known to be too tight. If
 ``n_members`` ever reads 1, that is a regression and not a config choice.
 """
 
+import inspect
 from pathlib import Path
 
 import yaml
@@ -68,6 +69,22 @@ def test_n_waves_is_what_psid_can_supply():
 def test_windows_per_panel_at_the_measured_plateau():
     c = _cfg()
     assert c["window"]["windows_per_panel"] == 8
+
+
+def test_flow_agg_matches_psid_and_the_code_default():
+    """PSID reports one calendar year of income per biennial interview.
+
+    Summing over the two-year wave made simulated income ~2x the empirical
+    measure, and cost 0.49 nats of held-out log q. The config and the code
+    default must not drift apart: a config saying 'last' while the code sums
+    would be invisible until someone compared magnitudes against PSID.
+    """
+    from hh_npe.data.waves import FLOW_AGG, aggregate_waves
+
+    assert _cfg()["window"]["flow_agg"] == "last"
+    assert "last" in FLOW_AGG and "sum" in FLOW_AGG
+    sig = inspect.signature(aggregate_waves)
+    assert sig.parameters["flow_agg"].default == "last"
 
 
 def test_generator_default_matches_the_config():

@@ -47,3 +47,9 @@ graphify-out/
 
 # Replication package
 replication-package-LLMRT/
+# PSID microdata — NEVER commit.
+# PSID's conditions of use prohibit redistribution; the extracts are obtained
+# per-user from the Data Center after registration. scripts/psid_sample.py
+# reads them from here, and PSID_DATA.md records the variable codes needed to
+# re-pull them, so nothing is lost by keeping the data out of the repo.
+PSID-data/

@@ -403,10 +403,40 @@ differs, and it must match the data the posterior will eventually be applied
 to.
 
 ### 6.2 Aggregation by variable type
-- **Flows** (`income`, `consumption`) — **summed** over the annual periods in
-  the window. With `wave_years = 1` this is the single year's value.
-- **Stocks** (`liquid_assets`) — value at the **end of the final year** of the
-  window.
+
+**Changed 2026-09-04.** Flows are read as the **annual rate in the window's
+final year**, not summed over it (`waves.flow_agg = "last"`).
+
+- **Flows** (`income`, `consumption`) — the value in the **final year** of the
+  window. Identical to the old behaviour at `wave_years = 1`.
+- **Stocks** (`liquid_assets`, `illiquid_assets`, `age`) — value at the **end
+  of the final year** of the window.
+
+**Why it changed.** A PSID biennial interview reports income for the single
+preceding calendar year: the 2011 wave carries `TOTAL FAMILY INCOME-2010`, the
+2013 wave carries 2012, and so on (`PSID_DATA.md`, verified against the
+extract). The observed series is therefore 2010, 2012, 2014, … — one-year flows
+sampled every two years, never a two-year total. Summing made simulated income
+roughly **twice** the measure the posterior would be applied to.
+
+That is not a harmless scale factor. The embedder standardizes per feature
+(§6.4), so a uniform doubling of `income` survives standardization as a
+distorted **income-to-debt ratio** — precisely the margin `beta` is identified
+from, since present bias shows up as expensive borrowing held against income
+and illiquid wealth.
+
+`flow_agg = "sum"` reproduces the pre-2026-09-04 behaviour and is retained only
+for Phase 1–2 artifacts.
+
+**Known residual.** PSID's stock and flow dates differ by about a year — the
+interview records wealth at the interview date but income for the prior
+calendar year — whereas this rule reads both from the same simulated year. A
+one-year offset within a two-year wave is second-order next to the factor-of-two
+it replaces, and correcting it would require the simulator to model an interview
+date it does not have. PSID's expenditure components are themselves split across
+two reference years within one wave (food from the interview year, education and
+clothing from the year before), so no single choice makes the empirical series
+internally coherent in time.
 
 Feature order is load-bearing — the embedder's input dimension is positional.
 Two sets are defined in `src/hh_npe/data/waves.py`:
@@ -422,8 +452,9 @@ sixteen target moments are wealth conditional on debt status** (§7). Dropping
 the identifying pattern is expensive borrowing held *simultaneously* with
 illiquid wealth. Output is `(n_households, n_waves, len(features))`, `float32`.
 
-`income` and `consumption` are flows (summed); every other feature is a stock
-(read at the end of the window).
+`income` and `consumption` are flows; every other feature is a stock. Under the
+default `flow_agg = "last"` both are read from the window's final year, so the
+distinction affects only `flow_agg = "sum"`.
 
 ### 6.3 Rebirth (single-lineage) filter
 HARK replaces dead agents with newborns (§5), so a raw window can splice two

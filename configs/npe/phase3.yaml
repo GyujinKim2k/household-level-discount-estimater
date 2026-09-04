@@ -35,17 +35,23 @@ dataset:
   n_waves: 7               # two years per wave -> 14 years per window.
                            # Chosen because PSID supplies exactly 7 biennial
                            # waves with a clean credit-card measure, 2011-2023
-                           # (PSID_DATA.md). 10 waves is sharper -- ensembled
-                           # held-out log q 5.446 vs 5.007, a real 0.44 nats --
-                           # but PSID cannot deliver it, and 7 is calibrated:
+                           # (PSID_DATA.md). 7 is calibrated:
                            #
-                           #   7 waves, k=8, 5-member ensemble
-                           #     log q      5.007
-                           #     coverage   beta 0.916  delta 0.902  crra 0.905
-                           #     ks_p       0.166 / 0.642 / 0.279   (all pass)
+                           #   7 waves, k=8, 5-member ensemble, flow_agg=last
+                           #     log q      5.471
+                           #     coverage   beta 0.920  delta 0.910  crra 0.909
+                           #     ks_p       0.308 / 0.104 / 0.349   (all pass)
+                           #
+                           # 10 waves measured 0.44 nats sharper, but BOTH arms
+                           # were cut with flows summed over the two-year wave
+                           # (the pre-2026-09-04 bug, SIMULATOR_SPEC 6.2). The
+                           # corrected 7-wave ensemble at 5.471 already beats
+                           # the old 10-wave figure of 5.446, so the true gap is
+                           # unmeasured. It does not change the choice -- PSID
+                           # supplies 7 either way -- but do not quote 0.44.
                            #
                            # Single models at 7 waves undercover reproducibly
-                           # (0.881/0.878/0.873, sd <= 0.012). That is
+                           # (0.893/0.879/0.872, sd <= 0.010). That is
                            # approximation variance, not an information limit,
                            # and the ensemble below is what fixes it -- see
                            # `ensemble` and SIMULATOR_SPEC 6.1.3. Do not read
@@ -99,6 +105,9 @@ window:
                           #   k=5   log q 4.816   coverage 0.907/0.893/0.900
                           #   k=8   log q 5.007   coverage 0.916/0.902/0.905
                           #   k=10  log q 5.007   coverage 0.918/0.909/0.902
+                          # (measured under flow_agg="sum"; the fix shifts all
+                          # three arms together, so the ordering stands but the
+                          # levels are ~0.46 nats low. k=8 re-measured at 5.471.)
                           # Saturates at 8: k=10 ties on log q for 25% more
                           # rows, k=5 costs 0.19 nats. Coverage is flat in k --
                           # augmentation never touched the undercoverage,
@@ -106,6 +115,23 @@ window:
   include_age_feature: true   # per-wave age as a 5th feature. PSID always
                               # records the head's age, so the posterior should
                               # condition on it rather than marginalize.
+  flow_agg: last          # How income and consumption are collapsed per wave.
+                          # 'last' = the annual rate in the wave's final year.
+                          # 'sum'  = total over the wave (pre-2026-09-04).
+                          #
+                          # A PSID biennial interview reports ONE calendar year
+                          # of income -- the 2011 wave carries TOTAL FAMILY
+                          # INCOME-2010 (PSID_DATA.md, verified in the extract).
+                          # Summing made simulated income ~2x the measure the
+                          # posterior gets applied to. Not a harmless scale
+                          # factor: the embedder standardizes per feature, so it
+                          # survived as a distorted income-to-debt ratio, which
+                          # is the margin beta is identified from.
+                          #
+                          # Fixing it was worth +0.49 nats (single models
+                          # 4.763 -> 5.257, seed sd <= 0.020), far outside noise,
+                          # and left calibration essentially unchanged. Keep
+                          # 'sum' only to reproduce Phase 1-2 artifacts.
 
 # Embedder — seq_len is taken from dataset.n_waves at build time.
 embedder:
@@ -130,10 +156,10 @@ embedder:
 # held-out draws and 1000 SBC draws:
 #
 #                     single (mean of 5)   best single   ensemble
-#   held-out log q          4.763             4.772        5.007
-#   coverage beta           0.881             0.894        0.916
-#   coverage delta          0.878             0.881        0.902
-#   coverage crra           0.873             0.890        0.905
+#   held-out log q          5.257             5.280        5.471
+#   coverage beta           0.893             0.900        0.920
+#   coverage delta          0.879             0.886        0.910
+#   coverage crra           0.872             0.884        0.909
 #
 # Single models undercover reproducibly (seed sd <= 0.012, so the ~0.03
 # shortfall is far outside noise): their credible intervals are too narrow.
@@ -151,7 +177,11 @@ ensemble:
                           # the dataset, the panel split and the SBC draws
                           # fixed (scripts/run_wave_matrix.sh).
   weights: uniform
-  # Residual: beta overcovers slightly (0.916 vs 0.900, ~1.7 SE at n_sbc=1000).
+  # Residual: the correction overshoots -- coverage 0.909-0.920 against a
+  # nominal 0.900, ~1-2 SE at n_sbc=1000. Fixing the flow aggregation moved
+  # log q by +0.49 nats and left this untouched (0.916 -> 0.920 on beta), which
+  # is evidence it is approximation bias rather than anything in the
+  # observation model.
   # Overcoverage is the conservative direction and much milder than what it
   # replaced, but it is unresolved -- it is smaller at k=5 (0.907), and telling
   # a real effect from noise needs several independent ensembles per cell (25

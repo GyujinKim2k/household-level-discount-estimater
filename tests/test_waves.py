@@ -43,14 +43,46 @@ def test_annual_waves_read_panel_directly():
         assert x[0, w, 2] == pytest.approx(panel["liquid_assets"][0, t])
 
 
-def test_biennial_flows_summed_over_two_year_window():
+def test_biennial_flows_default_to_the_final_year_rate():
+    """PSID reports one calendar year of income per biennial interview.
+
+    The 2011 wave carries TOTAL FAMILY INCOME-2010 -- a single year, not a
+    two-year total (PSID_DATA.md). Summing made simulated income roughly twice
+    the empirical measure, and because the embedder standardizes per feature
+    that survived as a distorted income-to-debt ratio, which is the margin beta
+    is identified from.
+    """
     panel = make_panel(N=2, T=20)
     x, _ = aggregate_waves(panel, age_start_sim=20, start_age=30, n_waves=2)
-    # Wave 0 = ages 30-31 = annual indices 10, 11.
-    expected_income_h0 = panel["income"][0, 10] + panel["income"][0, 11]
-    expected_cons_h0 = panel["consumption"][0, 10] + panel["consumption"][0, 11]
-    assert x[0, 0, 0] == pytest.approx(expected_income_h0)
-    assert x[0, 0, 1] == pytest.approx(expected_cons_h0)
+    # Wave 0 = ages 30-31 = annual indices 10, 11; reference year is 11.
+    assert x[0, 0, 0] == pytest.approx(panel["income"][0, 11])
+    assert x[0, 0, 1] == pytest.approx(panel["consumption"][0, 11])
+
+
+def test_biennial_flows_summed_when_asked():
+    """The old behaviour is still reachable, for Phase 1-2 reproduction."""
+    panel = make_panel(N=2, T=20)
+    x, _ = aggregate_waves(panel, age_start_sim=20, start_age=30, n_waves=2,
+                           flow_agg="sum")
+    assert x[0, 0, 0] == pytest.approx(
+        panel["income"][0, 10] + panel["income"][0, 11])
+    assert x[0, 0, 1] == pytest.approx(
+        panel["consumption"][0, 10] + panel["consumption"][0, 11])
+
+
+def test_flow_agg_modes_agree_at_annual_frequency():
+    """With one year per wave there is nothing to sum, so the modes coincide."""
+    panel = make_panel(N=2, T=20)
+    kw = dict(age_start_sim=20, start_age=30, n_waves=3, wave_years=1)
+    a, _ = aggregate_waves(panel, flow_agg="last", **kw)
+    b, _ = aggregate_waves(panel, flow_agg="sum", **kw)
+    np.testing.assert_array_equal(a, b)
+
+
+def test_bad_flow_agg_raises():
+    panel = make_panel(N=1, T=20)
+    with pytest.raises(ValueError, match="flow_agg must be one of"):
+        aggregate_waves(panel, age_start_sim=20, start_age=30, flow_agg="mean")
 
 
 def test_biennial_stock_at_end_of_window():
@@ -143,18 +175,20 @@ def test_twoasset_feature_set_adds_illiquid():
     assert np.all(x[:, :, 3] == 7.0)
 
 
-def test_stocks_are_not_summed_flows_are():
-    """A 2-year window must sum flows and read stocks once."""
+def test_flow_agg_separates_flows_from_stocks():
+    """Only flows change with flow_agg; stocks are read once either way."""
     from hh_npe.data.waves import FEATURES_TWOASSET
 
     panel = make_panel(N=1, T=20)
     panel["illiquid_assets"] = np.full((1, 20), 5.0)
     panel["consumption"] = np.full((1, 20), 3.0)
-    x, _ = aggregate_waves(
-        panel, age_start_sim=20, start_age=30, features=FEATURES_TWOASSET
-    )
-    assert x[0, 0, 1] == pytest.approx(6.0)  # consumption: flow, 2 x 3.0
-    assert x[0, 0, 3] == pytest.approx(5.0)  # illiquid: stock, read once
+    kw = dict(age_start_sim=20, start_age=30, features=FEATURES_TWOASSET)
+    x_last, _ = aggregate_waves(panel, flow_agg="last", **kw)
+    x_sum, _ = aggregate_waves(panel, flow_agg="sum", **kw)
+    assert x_last[0, 0, 1] == pytest.approx(3.0)  # consumption: one year
+    assert x_sum[0, 0, 1] == pytest.approx(6.0)   # consumption: 2 x 3.0
+    assert x_last[0, 0, 3] == pytest.approx(5.0)  # illiquid: stock, unchanged
+    assert x_sum[0, 0, 3] == pytest.approx(5.0)
 
 
 def test_missing_feature_raises():

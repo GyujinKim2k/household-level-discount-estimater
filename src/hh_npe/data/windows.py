@@ -97,6 +97,7 @@ def cut_windows(
     n_waves: int,
     wave_years: int,
     features: tuple[str, ...],
+    flow_agg: str = "last",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Cut the windows named by ``starts`` (shape ``(n_rows, k)``) out of a panel.
 
@@ -113,6 +114,7 @@ def cut_windows(
             x, alive = aggregate_waves(
                 sub, age_start_sim=AGE_START_SIM, start_age=int(s),
                 n_waves=n_waves, wave_years=wave_years, features=features,
+                flow_agg=flow_agg,
             )
             keep = alive.all(axis=1)
             thetas.append(theta_rows[rows][keep])
@@ -132,6 +134,7 @@ def window_panel(
     wave_years: int = 2,
     seed: int = 0,
     with_age: bool = True,
+    flow_agg: str = "last",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Random-age windows from an in-memory panel (e.g. fresh SBC simulations)."""
     panel = add_age(panel)
@@ -139,7 +142,7 @@ def window_panel(
     starts = sample_start_ages(n_rows, k, start_low, start_high, seed=seed)
     features = FEATURES_TWOASSET_AGE if with_age else FEATURES_TWOASSET
     th, x, ids = cut_windows(panel, np.asarray(theta), np.arange(n_rows),
-                             starts, n_waves, wave_years, features)
+                             starts, n_waves, wave_years, features, flow_agg)
     return (torch.from_numpy(th).float(), torch.from_numpy(x).float(),
             torch.from_numpy(ids).long())
 
@@ -161,6 +164,7 @@ def build_windowed(
     seed: int = 0,
     with_age: bool = True,
     fixed_start: int | None = None,
+    flow_agg: str = "last",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cut ``k`` windows from every panel in ``shard_files``.
 
@@ -199,7 +203,7 @@ def build_windowed(
                                        seed=seed + lo)
 
         th, x, ids_ = cut_windows(panel, theta_all[lo:hi], lo + np.arange(n_panels),
-                                  starts, n_waves, wave_years, features)
+                                  starts, n_waves, wave_years, features, flow_agg)
         thetas.append(th)
         xs.append(x)
         ids.append(ids_)

@@ -45,8 +45,25 @@ FEATURES_TWOASSET_AGE: tuple[str, ...] = FEATURES_TWOASSET + ("age",)
 #: Default remains the MVP set so Phase 1-2 behaviour is unchanged.
 FEATURES = FEATURES_MVP
 
-#: Variables summed over the window; everything else is a stock read at its end.
+#: Variables measured per unit time; everything else is a stock read at the
+#: window's end. How flows are collapsed is set by ``flow_agg`` below.
 FLOWS = frozenset({"income", "consumption"})
+
+#: How a flow is collapsed to one number per wave.
+#:
+#: ``"last"`` — the annual rate in the wave's final year. **This is the default
+#: and matches PSID**: a biennial interview reports income for the single
+#: preceding calendar year, so the observed series is 2010, 2012, 2014, … and
+#: never a two-year total. Verified against the extract — the 2011 wave carries
+#: ``TOTAL FAMILY INCOME-2010`` (`PSID_DATA.md`).
+#:
+#: ``"sum"`` — total over the window. What Phases 1–2 used and what
+#: `SIMULATOR_SPEC` §6.2 specified until 2026-09-04. At ``wave_years = 2`` it
+#: makes simulated income roughly twice the PSID measure, which is not a
+#: harmless scale factor: the embedder standardizes per feature, so it survives
+#: as a distorted income-to-debt ratio — exactly the margin `beta` is
+#: identified from. Retained only to reproduce Phase 1–2 artifacts.
+FLOW_AGG = ("last", "sum")
 
 
 def aggregate_waves(
@@ -56,6 +73,7 @@ def aggregate_waves(
     n_waves: int = 5,
     wave_years: int = 2,
     features: tuple[str, ...] = FEATURES,
+    flow_agg: str = "last",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Collapse an annual simulation panel to an ``(N, n_waves, n_features)`` tensor.
 
@@ -77,6 +95,11 @@ def aggregate_waves(
         Panel keys to extract, in order. :data:`FEATURES_MVP` (Phases 1-2) or
         :data:`FEATURES_TWOASSET` (Phase 3). Order is load-bearing: the
         embedder's input dimension is positional.
+    flow_agg
+        How :data:`FLOWS` are collapsed: ``"last"`` (the annual rate in the
+        wave's final year, matching PSID's single-year income report) or
+        ``"sum"`` (window total, the pre-2026-09-04 behaviour). See
+        :data:`FLOW_AGG`. Identical at ``wave_years = 1``.
 
     Returns
     -------
@@ -88,6 +111,8 @@ def aggregate_waves(
     """
     if wave_years < 1:
         raise ValueError(f"wave_years must be >= 1; got {wave_years}")
+    if flow_agg not in FLOW_AGG:
+        raise ValueError(f"flow_agg must be one of {FLOW_AGG}; got {flow_agg!r}")
 
     missing = [f for f in features if f not in panel]
     if missing:
@@ -111,9 +136,12 @@ def aggregate_waves(
         t1 = t0 + wave_years  # exclusive
         for k, name in enumerate(features):
             series = panel[name]
-            x[:, w, k] = (
-                series[:, t0:t1].sum(axis=1) if name in FLOWS else series[:, t1 - 1]
-            )
+            if name in FLOWS and flow_agg == "sum":
+                x[:, w, k] = series[:, t0:t1].sum(axis=1)
+            else:
+                # Flows under "last", and every stock, are read at the final
+                # year of the wave -- the survey's reference year.
+                x[:, w, k] = series[:, t1 - 1]
 
         # Rebirth detection: t_age must be monotonically non-decreasing across
         # the window (and across the boundary from the prior period if any).
