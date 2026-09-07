@@ -38,6 +38,11 @@ import numpy as np
 import torch
 
 from hh_npe.data.dataset import read_solver_config
+from hh_npe.data.waves import (
+    FEATURE_SETS,
+    FEATURES_TWOASSET,
+    FEATURES_TWOASSET_AGE,
+)
 from hh_npe.data.windows import build_windowed, max_start_age, window_panel
 from hh_npe.evaluation.scoring import calibration_scores, estimation_scores
 from hh_npe.npe.embedder import TrajectoryTransformer
@@ -137,6 +142,27 @@ def main() -> None:
                    help="Windows per panel (augmentation).")
     p.add_argument("--no_age", action="store_true",
                    help="Drop the per-wave age channel.")
+    p.add_argument("--per_sequence", action="store_true",
+                   help="Normalise each dollar feature within a household, "
+                        "across its waves: (x - hh mean) / hh sd. A "
+                        "proportional measurement bias then cancels exactly, "
+                        "which is the PSID consumption problem -- but levels "
+                        "are removed, and levels are what Laibson et al.'s "
+                        "moments are made of. `age` is EXCLUDED and keeps the "
+                        "global scale: it advances by wave_years every wave, so "
+                        "per-household normalisation maps every household to "
+                        "the same ramp and destroys the channel outright.")
+    p.add_argument("--features", type=str, default=None,
+                   choices=sorted(FEATURE_SETS),
+                   help="Named feature set (hh_npe.data.waves.FEATURE_SETS). "
+                        "Default follows --no_age. 'nocons_age' drops "
+                        "consumption, which is Laibson et al.'s own "
+                        "information set -- their 16 moments use only "
+                        "credit-card borrowing and wealth. Applied to the "
+                        "training, held-out AND SBC windows together; scoring "
+                        "a posterior on a different feature set than it was "
+                        "trained on fails on shape, but scoring it on the same "
+                        "features cut a different way would not.")
     p.add_argument("--batch_size", type=int, default=256,
                    help="Training minibatch. The default starves the GPU: the "
                         "model is ~200k parameters on (batch, waves, 5) inputs, "
@@ -194,7 +220,8 @@ def main() -> None:
 
     theta_all = sample_sobol(args.n_total, PHASE3, seed=0)
     win = dict(start_low=args.start_low, start_high=args.start_high,
-               wave_years=WAVE_YEARS, with_age=not args.no_age)
+               wave_years=WAVE_YEARS, with_age=not args.no_age,
+               features=FEATURE_SETS[args.features] if args.features else None)
 
     results = {}
     for k in args.windows:
@@ -233,9 +260,14 @@ def main() -> None:
         # draws fixed (their seeds are passed explicitly above), so a spread in
         # calibration across seeds is optimization noise and nothing else.
         seed_all(args.train_seed)
+        feats = (FEATURE_SETS[args.features] if args.features
+                 else (FEATURES_TWOASSET if args.no_age else FEATURES_TWOASSET_AGE))
+        # Derived, not hardcoded: the age column moves with the feature set.
+        skip = tuple(i for i, f in enumerate(feats) if f == "age")
         embedder = TrajectoryTransformer(
             n_features=x_tr.shape[-1], seq_len=k,
             feature_mean=x_tr.mean(dim=(0, 1)), feature_std=x_tr.std(dim=(0, 1)),
+            per_sequence=args.per_sequence, per_sequence_skip=skip,
             **EMBEDDER,
         )
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -274,6 +306,8 @@ def main() -> None:
         "k_windows_per_panel": args.k, "wave_years": WAVE_YEARS,
         "train_n": args.train_n, "train_seed": args.train_seed,
         "batch_size": args.batch_size, "learning_rate": args.learning_rate,
+        "per_sequence": args.per_sequence,
+        "features": list(FEATURE_SETS[args.features]) if args.features else None,
         "n_sbc": args.n_sbc, "n_post": args.n_post,
         "n_heldout_eval": args.n_heldout_eval,
         "age_envelope": [args.start_low,

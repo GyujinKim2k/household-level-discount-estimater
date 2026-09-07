@@ -135,12 +135,14 @@ def window_panel(
     seed: int = 0,
     with_age: bool = True,
     flow_agg: str = "last",
+    features: tuple[str, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Random-age windows from an in-memory panel (e.g. fresh SBC simulations)."""
     panel = add_age(panel)
     n_rows = len(theta)
     starts = sample_start_ages(n_rows, k, start_low, start_high, seed=seed)
-    features = FEATURES_TWOASSET_AGE if with_age else FEATURES_TWOASSET
+    if features is None:
+        features = FEATURES_TWOASSET_AGE if with_age else FEATURES_TWOASSET
     th, x, ids = cut_windows(panel, np.asarray(theta), np.arange(n_rows),
                              starts, n_waves, wave_years, features, flow_agg)
     return (torch.from_numpy(th).float(), torch.from_numpy(x).float(),
@@ -165,6 +167,7 @@ def build_windowed(
     with_age: bool = True,
     fixed_start: int | None = None,
     flow_agg: str = "last",
+    features: tuple[str, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cut ``k`` windows from every panel in ``shard_files``.
 
@@ -175,7 +178,8 @@ def build_windowed(
     Returns ``(theta, x, panel_id)``. ``panel_id`` is the global Sobol draw
     index, so it identifies a household across shards and across windows.
     """
-    features = FEATURES_TWOASSET_AGE if with_age else FEATURES_TWOASSET
+    if features is None:
+        features = FEATURES_TWOASSET_AGE if with_age else FEATURES_TWOASSET
     limit = max_start_age(n_waves, wave_years)
     if fixed_start is None and start_high > limit:
         raise ValueError(

@@ -34,6 +34,7 @@ import numpy as np
 import torch
 from scipy import stats
 
+from hh_npe.data.waves import FEATURE_SETS
 from hh_npe.data.windows import build_windowed, window_panel
 from hh_npe.evaluation.scoring import calibration_scores, estimation_scores
 from hh_npe.npe.prior import PHASE3, sample_sobol
@@ -84,6 +85,14 @@ def main() -> None:
     p.add_argument("--n_heldout_eval", type=int, default=2048)
     p.add_argument("--n_post", type=int, default=1000)
     p.add_argument("--start_low", type=int, default=25)
+    p.add_argument("--features", type=str, default=None,
+                   choices=sorted(FEATURE_SETS),
+                   help="Must match what the members were TRAINED on. The "
+                        "evaluation windows are rebuilt here, so a mismatch "
+                        "means scoring a posterior on features it never saw. "
+                        "A different feature *count* aborts on shape; the same "
+                        "count cut differently would not, so pass it "
+                        "explicitly rather than relying on the default.")
     p.add_argument("--out", type=Path, default=Path("outputs/ensemble"))
     args = p.parse_args()
 
@@ -111,7 +120,8 @@ def main() -> None:
     held = [f for f in shard_files if int(np.load(f)["lo"]) >= args.train_n]
     theta_all = sample_sobol(args.n_total, PHASE3, seed=0)
     win = dict(start_low=args.start_low, start_high=start_high,
-               wave_years=WAVE_YEARS, with_age=True)
+               wave_years=WAVE_YEARS, with_age=True,
+               features=FEATURE_SETS[args.features] if args.features else None)
 
     th_ho, x_ho, _ = build_windowed(held, theta_all, k=1, n_waves=w, seed=999,
                                     **win)

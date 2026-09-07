@@ -58,11 +58,33 @@ class TrajectoryTransformer(nn.Module):
         dropout: float = 0.0,
         feature_mean: torch.Tensor | None = None,
         feature_std: torch.Tensor | None = None,
+        per_sequence: bool = False,
+        per_sequence_skip: tuple[int, ...] = (),
     ) -> None:
         super().__init__()
         self.n_features = n_features
         self.seq_len = seq_len
 
+        # Per-household (per-sequence) normalisation: subtract this
+        # household's own mean across its waves and divide by its own sd.
+        #
+        # The point of it is that a proportional measurement bias cancels
+        # exactly -- if c_obs = k * c_true with k constant within a household,
+        # the normalised series is identical. That is the PSID consumption
+        # problem in one line.
+        #
+        # The cost is that it removes LEVELS, and levels are what identifies
+        # this model: Laibson et al.'s moments are %Visa, meanVisa, wealth|debt
+        # and wealth|no debt, all level quantities. A household permanently at
+        # -$20,000 liquid and one at -$200 normalise to the same series.
+        #
+        # `per_sequence_skip` names feature indices to leave on the global
+        # scale. Age must normally be skipped: it advances by exactly
+        # wave_years each wave, so per-sequence normalisation maps every
+        # household to the identical ramp and the age channel -- worth ~1.9
+        # nats (SIMULATOR_SPEC 6.1.1) -- carries nothing at all.
+        self.per_sequence = per_sequence
+        self.per_sequence_skip = tuple(per_sequence_skip)
         self.standardize = feature_mean is not None
         if self.standardize:
             if feature_std is None:
@@ -109,6 +131,24 @@ class TrajectoryTransformer(nn.Module):
                 f"got {tuple(x.shape)}"
             )
         h = (x - self.feature_mean) / self.feature_std if self.standardize else x
+        # getattr, not attribute access: posteriors are pickled whole, and
+        # unpickling an embedder saved before `per_sequence` existed does not
+        # call __init__, so the attribute is simply absent. Older checkpoints
+        # must keep loading -- outputs/flow_fix predates this field and is the
+        # arm the PSID results are built on.
+        if getattr(self, "per_sequence", False):
+            # dim=1 is the wave axis: statistics are per (household, feature).
+            m = h.mean(dim=1, keepdim=True)
+            # A feature that never moves within a household (no credit-card
+            # debt in any wave, illiquid stuck at zero) has sd 0; clamping
+            # sends it to 0 rather than to inf.
+            sd = h.std(dim=1, keepdim=True).clamp_min(1e-6)
+            hp = (h - m) / sd
+            if getattr(self, "per_sequence_skip", ()):
+                keep = torch.zeros(h.shape[-1], dtype=torch.bool, device=h.device)
+                keep[list(self.per_sequence_skip)] = True
+                hp = torch.where(keep, h, hp)
+            h = hp
         h = self.input_norm(h)
         h = self.input_proj(h) + self.pos_emb
         h = self.encoder(h)

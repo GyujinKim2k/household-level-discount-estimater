@@ -42,6 +42,41 @@ FEATURES_TWOASSET: tuple[str, ...] = FEATURES_MVP + ("illiquid_assets",)
 #: any other stock.
 FEATURES_TWOASSET_AGE: tuple[str, ...] = FEATURES_TWOASSET + ("age",)
 
+#: Phase 3 without consumption. This is **Laibson et al.'s own information
+#: set**: their 16 target moments are
+#: ``[%Visa, meanVisa, wealth|debt, wealth|no debt] x 4 age bands``
+#: (`scripts/validate_twoasset.py:32`) and their SCF moment code
+#: (`SCF/code/2_buildmoments.do`) has no consumption block at all -- SCF is a
+#: wealth survey and does not collect it. So (beta, delta, rho) are identified
+#: in their design entirely from credit-card borrowing and wealth conditional
+#: on debt status. Dropping consumption returns us to that information set,
+#: plus income and the panel structure they never had.
+#:
+#: The empirical motive is that consumption is the one feature with a
+#: measurement problem: PSID expenditure sits ~34% below the simulated level,
+#: and the shortfall is *not* uniform -- consumption/income runs 1.68 in the
+#: bottom income decile to 0.40 in the top, against a flat ~0.99 in
+#: simulation, so no single rescaling can reconcile it. About 21 points of
+#: that 34 is our own deliberate stripping of mortgage and vehicle principal
+#: (saving, not consumption, and correct to remove); ~8 points are categories
+#: PSID never collects; the remainder mixes under-reporting with genuine
+#: saving behaviour and is not separable. See PSID_DATA.md.
+FEATURES_TWOASSET_NOCONS: tuple[str, ...] = (
+    "income", "liquid_assets", "illiquid_assets",
+)
+FEATURES_TWOASSET_NOCONS_AGE: tuple[str, ...] = (
+    FEATURES_TWOASSET_NOCONS + ("age",)
+)
+
+#: Named sets, for CLI selection. Order within each is load-bearing.
+FEATURE_SETS: dict[str, tuple[str, ...]] = {
+    "mvp": FEATURES_MVP,
+    "twoasset": FEATURES_TWOASSET,
+    "twoasset_age": FEATURES_TWOASSET_AGE,
+    "nocons": FEATURES_TWOASSET_NOCONS,
+    "nocons_age": FEATURES_TWOASSET_NOCONS_AGE,
+}
+
 #: Default remains the MVP set so Phase 1-2 behaviour is unchanged.
 FEATURES = FEATURES_MVP
 
